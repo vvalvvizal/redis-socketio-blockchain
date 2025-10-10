@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>실시간 블록 익스플로러</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      padding: 20px;
+      color: #333;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      padding: 30px;
+    }
+
+    header {
+      border-bottom: 2px solid #eee;
+      padding-bottom: 20px;
+      margin-bottom: 30px;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #111;
+    }
+
+    .subtitle {
+      color: #666;
+      font-size: 0.95rem;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: #f0f0f0;
+      border-radius: 20px;
+      font-size: 0.9rem;
+      margin-bottom: 25px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background: #22c55e;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .blocks-container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .block-card {
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      padding: 18px;
+      transition: all 0.2s ease;
+      animation: slideIn 0.3s ease;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .block-card:hover {
+      border-color: #999;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    }
+
+    .block-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .block-number {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #111;
+    }
+
+    .block-badge {
+      background: #111;
+      color: white;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+    }
+
+    .block-info {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 15px;
+      padding-top: 12px;
+      border-top: 1px solid #f0f0f0;
+    }
+
+    .info-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .info-label {
+      font-size: 0.75rem;
+      color: #999;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .info-value {
+      font-size: 0.95rem;
+      color: #333;
+      font-weight: 500;
+    }
+
+    .no-blocks {
+      text-align: center;
+      padding: 60px 20px;
+      color: #999;
+      font-size: 0.95rem;
+    }
+
+    @media (max-width: 768px) {
+      .container {
+        padding: 20px;
+      }
+
+      h1 {
+        font-size: 1.5rem;
+      }
+      
+      .block-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>실시간 블록 익스플로러</h1>
+      <p class="subtitle">Polygon Amoy Testnet</p>
+    </header>
+
+    <div class="status">
+      <div class="status-dot"></div>
+      <span id="connection-status">연결 중...</span>
+    </div>
+
+    <div class="blocks-container" id="blocks">
+      <div class="no-blocks">블록 정보를 기다리는 중...</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script>
+    const socket = io("http://localhost:4000");
+    const blocksContainer = document.getElementById("blocks");
+    const connectionStatus = document.getElementById("connection-status");
+    let blockCount = 0;
+
+    socket.on("connect", () => {
+      connectionStatus.textContent = "연결됨";
+    });
+
+    socket.on("disconnect", () => {
+      connectionStatus.textContent = "연결 끊김";
+    });
+
+    socket.on("newBlock", (data) => {
+      if (blockCount === 0) {
+        blocksContainer.innerHTML = "";
+      }
+      blockCount++;
+
+      const blockCard = document.createElement("div");
+      blockCard.className = "block-card";
+      
+      const timestamp = new Date(data.timestamp);
+      const now = new Date();
+      const secondsAgo = Math.floor((now - timestamp) / 1000);
+      
+      blockCard.innerHTML = `
+        <div class="block-header">
+          <div class="block-number">Block #${data.blockNumber.toLocaleString()}</div>
+          <div class="block-badge">NEW</div>
+        </div>
+        <div class="block-info">
+          <div class="info-item">
+            <div class="info-label">타임스탬프</div>
+            <div class="info-value">${timestamp.toLocaleTimeString('ko-KR')}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">수신 시간</div>
+            <div class="info-value">${secondsAgo === 0 ? '방금 전' : secondsAgo + '초 전'}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">네트워크</div>
+            <div class="info-value">Polygon Amoy</div>
+          </div>
+        </div>
+      `;
+
+      blocksContainer.prepend(blockCard);
+
+      setTimeout(() => {
+        const badge = blockCard.querySelector('.block-badge');
+        if (badge) {
+          badge.remove();
+        }
+      }, 3000);
+
+      while (blocksContainer.children.length > 20) {
+        blocksContainer.removeChild(blocksContainer.lastChild);
+      }
+    });
+  </script>
+</body>
+</html>
