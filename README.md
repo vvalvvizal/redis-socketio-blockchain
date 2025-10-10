@@ -57,7 +57,7 @@ redis-cli ping  # PONG 응답이 나와야 함
 
 ## 🚀 실행 방법
 
-총 **3개의 터미널**이 필요합니다:
+총 **4개의 터미널**이 필요합니다:
 
 ### 터미널 1: Server1 실행
 ```bash
@@ -85,35 +85,73 @@ node server2.js
 Socket.IO server listening on port 3001
 ```
 
-### 터미널 3: Client 실행
+### 터미널 3: Client A 실행 (메시지 전송)
 ```bash
 node client.js
 ```
 
 출력 예시:
 ```
-connected: [socket-id]
-Received: From server 3000: hello world
+[Client A] connected to Server 3000: xxxxx
+[Client A] Received: From server 3000: hello world
 ```
 
-## 🧪 테스트 방법
+### 터미널 4: Client B 실행 (메시지 수신)
+```bash
+node clientB.js
+```
 
-### 기본 테스트
-1. Server1, Server2를 각각 실행
-2. Client를 실행하여 메시지 전송 확인
+출력 예시:
+```
+[Client B] connected to Server 3001: yyyyy
+[Client B] Received: From server 3000: hello world
+```
 
-### Redis 동작 확인
-여러 클라이언트를 동시에 실행하여 테스트:
+## 🧪 Redis 동작 확인 테스트
 
+### 테스트 시나리오
+1. **Client A** → Server1(3000)에 연결하여 `'hello world'` 메시지 전송
+2. **Client B** → Server2(3001)에 연결하여 메시지 수신 대기
+3. ✅ **Client B가 Server1의 메시지를 받으면 Redis 정상 작동!**
+
+### 실행 순서
+
+**1단계: 서버 실행**
+```bash
+# 터미널 1
+node server1.js
+
+# 터미널 2
+node server2.js
+```
+
+**2단계: Client B 먼저 실행 (수신 대기)**
 ```bash
 # 터미널 3
-node client.js  # Server1(3000)에 연결
-
-# 터미널 4에서 Server2로 연결하는 클라이언트 실행
-# client.js를 복사하여 포트 3001로 변경 후 실행
+node clientB.js
 ```
 
-두 클라이언트 모두 같은 메시지를 받으면 Redis Adapter가 정상 작동하는 것입니다.
+**3단계: Client A 실행 (메시지 전송)**
+```bash
+# 터미널 4
+node client.js
+```
+
+### 예상 결과
+
+**Client A (터미널 4):**
+```
+[Client A] connected to Server 3000: xxxxx
+[Client A] Received: From server 3000: hello world
+```
+
+**Client B (터미널 3):**
+```
+[Client B] connected to Server 3001: yyyyy
+[Client B] Received: From server 3000: hello world  ← Redis를 통해 받음!
+```
+
+💡 **핵심:** Client B는 Server2에 연결되어 있지만, Server1에서 발생한 메시지를 **Redis를 통해** 받습니다!
 
 ## 📁 파일 구조
 
@@ -121,7 +159,8 @@ node client.js  # Server1(3000)에 연결
 .
 ├── server1.js          # Socket.IO 서버 (포트 3000)
 ├── server2.js          # Socket.IO 서버 (포트 3001)
-├── client.js           # Socket.IO 클라이언트
+├── client.js           # Client A - Server1에 연결, 메시지 전송
+├── clientB.js          # Client B - Server2에 연결, 메시지 수신
 ├── package.json        # 프로젝트 의존성
 └── README.md           # 프로젝트 문서
 ```
@@ -134,44 +173,19 @@ node client.js  # Server1(3000)에 연결
 - **Redis Adapter 설정**: `io.adapter(createAdapter(pubClient, subClient))`
 - **메시지 브로드캐스트**: `io.emit()`으로 모든 클라이언트에게 전송
 
-### Client (client.js)
+### Client
 
-- **서버 연결**: `io('http://localhost:3000')`
-- **메시지 전송**: `socket.emit('msg', 'hello world')`
-- **메시지 수신**: `socket.on('msg', callback)`
+**Client A (client.js):**
+- Server1(3000)에 연결
+- `socket.emit('msg', 'hello world')` - 메시지 전송
+- `socket.on('msg', callback)` - 메시지 수신
 
-## ⚠️ 문제 해결
+**Client B (clientB.js):**
+- Server2(3001)에 연결
+- 메시지 전송 없이 **수신만** 함
+- `socket.on('msg', callback)` - 메시지 수신 대기
+- Redis를 통해 Server1의 메시지도 받음
 
-### 포트 이미 사용 중 (EADDRINUSE)
-```bash
-# 포트 사용 중인 프로세스 확인
-lsof -ti:3000
-lsof -ti:3001
-
-# 프로세스 종료
-kill -9 <PID>
-
-# 또는 한 번에
-lsof -ti:3000,3001 | xargs kill -9
-```
-
-### Redis 연결 실패
-```bash
-# Redis 서버 상태 확인
-redis-cli ping
-
-# Redis 재시작
-brew services restart redis
-```
-
-## 💡 활용 예시
-
-이 패턴은 다음과 같은 경우에 유용합니다:
-
-- **채팅 애플리케이션**: 여러 서버에 분산된 사용자들 간 실시간 메시징
-- **실시간 알림 시스템**: 모든 서버에서 동일한 알림 전파
-- **협업 도구**: 다중 서버 환경에서 실시간 동기화
-- **로드 밸런싱**: 여러 서버로 부하 분산하면서도 메시지 동기화 유지
 
 ## 📚 참고 자료
 
