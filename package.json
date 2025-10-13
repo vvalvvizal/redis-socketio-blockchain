@@ -1,8 +1,16 @@
 {
+  "name": "socketio-redis-block-explorer",
+  "version": "1.0.0",
+  "description": "실시간 블록 익스플로러 with Socket.IO + Redis",
   "type": "module",
   "scripts": {
-    "start": "node server/src/index.js"
+    "start": "node server/src/index.js",
+    "polling": "node server/src/block-polling.js",
+    "dev": "node server/src/index.js"
   },
+  "keywords": ["socket.io", "redis", "blockchain", "real-time"],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.12.2",
