@@ -1,0 +1,9 @@
+# GitHub 언어 통계에서 제외할 파일들
+*.html linguist-detectable=false
+server/public/* linguist-vendored
+assets/* linguist-vendored
+
+# JavaScript를 주 언어로 설정
+*.js linguist-detectable=true
+*.json linguist-detectable=false
+
