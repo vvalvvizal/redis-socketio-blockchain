@@ -2,7 +2,7 @@
 
 Socket.IO + Redis를 활용한 다중 네트워크 블록체인 실시간 모니터링
 
-![Demo](./assets/Oct-13-2025%2018-14-55.gif)
+![polling](https://github.com/user-attachments/assets/e8709453-aaab-437c-ba23-074351b7885d)
 
 ## 🚀 빠른 시작
 
