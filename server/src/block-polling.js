@@ -1,14 +1,28 @@
 import { createClient } from "redis";
 import axios from "axios";
+import dotenv from "dotenv";
 
-const redis = createClient();
+dotenv.config();
+
+const POLYGON_RPC_URL = process.env.POLYGON_RPC_URL;
+const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL;
+const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+
+const redis = createClient({ url: REDIS_URL });
 await redis.connect();
 
-console.log("✅ Block Polling started - publishing to Redis every 5 seconds");
+// 네트워크별 폴링 간격 (밀리초)
+const POLYGON_POLL_INTERVAL = 5000;  // 5초 (Polygon은 약 2초마다 블록 생성)
+const SOLANA_POLL_INTERVAL = 500;     // 0.5초 (Solana는 약 400ms마다 슬롯 생성)
 
-async function pollLatestBlock() {
+console.log("✅ Multi-Network Block Polling started");
+console.log(`📍 Polygon RPC: ${POLYGON_RPC_URL} (${POLYGON_POLL_INTERVAL}ms 간격)`);
+console.log(`📍 Solana RPC: ${SOLANA_RPC_URL} (${SOLANA_POLL_INTERVAL}ms 간격)`);
+
+// Polygon Amoy 네트워크 폴링
+async function pollPolygonBlock() {
   try {
-    const { data } = await axios.post("https://rpc-amoy.polygon.technology", {
+    const { data } = await axios.post(POLYGON_RPC_URL, {
       jsonrpc: "2.0",
       id: 1,
       method: "eth_blockNumber",
@@ -16,16 +30,46 @@ async function pollLatestBlock() {
     });
 
     const blockNumber = parseInt(data.result, 16);
-    console.log("🔹 [Polling] Latest block:", blockNumber);
-    await redis.publish("new_block", JSON.stringify({ blockNumber }));
-    console.log("📤 [Polling] Published to Redis");
+    console.log("🔹 [Polygon] Latest block:", blockNumber);
+    await redis.publish("new_block", JSON.stringify({
+      network: "Polygon Amoy",
+      blockNumber: blockNumber,
+      timestamp: Date.now()
+    }));
   } catch (error) {
-    console.error("❌ [Polling] Error:", error.message);
+    console.error("❌ [Polygon] Error:", error.message);
   }
 }
 
-// 즉시 한 번 실행
-pollLatestBlock();
+// Solana Devnet 네트워크 폴링
+async function pollSolanaSlot() {
+  try {
+    const { data } = await axios.post(SOLANA_RPC_URL, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getSlot",
+      params: [],
+    });
 
-// 5초마다 실행
-setInterval(pollLatestBlock, 5000);
+    const slotNumber = data.result;
+    console.log("🔹 [Solana] Latest slot:", slotNumber);
+    await redis.publish("new_block", JSON.stringify({
+      network: "Solana Devnet",
+      blockNumber: slotNumber, // Solana는 slot을 blockNumber로 표시
+      timestamp: Date.now()
+    }));
+  } catch (error) {
+    console.error("❌ [Solana] Error:", error.message);
+  }
+}
+
+// 각 네트워크를 독립적으로 폴링 (다른 간격으로)
+// 즉시 한 번 실행
+pollPolygonBlock();
+pollSolanaSlot();
+
+// Polygon: 5초마다 폴링
+setInterval(pollPolygonBlock, POLYGON_POLL_INTERVAL);
+
+// Solana: 0.5초마다 폴링 (약 400ms마다 슬롯 생성되는 빠른 속도 반영)
+setInterval(pollSolanaSlot, SOLANA_POLL_INTERVAL);

@@ -8,12 +8,18 @@
     "polling": "node server/src/block-polling.js",
     "dev": "node server/src/index.js"
   },
-  "keywords": ["socket.io", "redis", "blockchain", "real-time"],
+  "keywords": [
+    "socket.io",
+    "redis",
+    "blockchain",
+    "real-time"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.12.2",
+    "dotenv": "^16.6.1",
     "express": "^5.1.0",
     "redis": "^5.8.3",
     "socket.io": "^4.8.1",

@@ -77,11 +77,22 @@
     }
 
     .block-card {
-      border: 1px solid #e5e5e5;
+      border: 2px solid #e5e5e5;
       border-radius: 6px;
       padding: 18px;
       transition: all 0.2s ease;
       animation: slideIn 0.3s ease;
+      position: relative;
+    }
+
+    .block-card.polygon {
+      border-left: 4px solid #8247e5;
+      background: linear-gradient(to right, rgba(130, 71, 229, 0.05), transparent);
+    }
+
+    .block-card.solana {
+      border-left: 4px solid #14f195;
+      background: linear-gradient(to right, rgba(20, 241, 149, 0.05), transparent);
     }
 
     @keyframes slideIn {
@@ -111,6 +122,14 @@
       font-size: 1.2rem;
       font-weight: 600;
       color: #111;
+    }
+
+    .network-polygon {
+      color: #8247e5;
+    }
+
+    .network-solana {
+      color: #14f195;
     }
 
     .block-badge {
@@ -178,7 +197,7 @@
   <div class="container">
     <header>
       <h1>실시간 블록 익스플로러</h1>
-      <p class="subtitle">Polygon Amoy Testnet</p>
+      <p class="subtitle">Multi-Network: Polygon Amoy & Solana Devnet</p>
     </header>
 
     <div class="status">
@@ -213,18 +232,28 @@
       blockCount++;
 
       const blockCard = document.createElement("div");
-      blockCard.className = "block-card";
       
       const timestamp = new Date(data.timestamp);
       const now = new Date();
       const secondsAgo = Math.floor((now - timestamp) / 1000);
       
+      const isSolana = data.network.includes('Solana');
+      const blockLabel = isSolana ? 'Slot' : 'Block';
+      const networkClass = isSolana ? 'network-solana' : 'network-polygon';
+      const cardClass = isSolana ? 'solana' : 'polygon';
+      
+      blockCard.className = `block-card ${cardClass}`;
+      
       blockCard.innerHTML = `
         <div class="block-header">
-          <div class="block-number">Block #${data.blockNumber.toLocaleString()}</div>
+          <div class="block-number">${blockLabel} #${data.blockNumber}</div>
           <div class="block-badge">NEW</div>
         </div>
         <div class="block-info">
+          <div class="info-item">
+            <div class="info-label">네트워크</div>
+            <div class="info-value ${networkClass}">${data.network}</div>
+          </div>
           <div class="info-item">
             <div class="info-label">타임스탬프</div>
             <div class="info-value">${timestamp.toLocaleTimeString('ko-KR')}</div>
@@ -232,10 +261,6 @@
           <div class="info-item">
             <div class="info-label">수신 시간</div>
             <div class="info-value">${secondsAgo === 0 ? '방금 전' : secondsAgo + '초 전'}</div>
-          </div>
-          <div class="info-item">
-            <div class="info-label">네트워크</div>
-            <div class="info-value">Polygon Amoy</div>
           </div>
         </div>
       `;
