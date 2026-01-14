@@ -233,7 +233,7 @@
 
       const blockCard = document.createElement("div");
       
-      const timestamp = new Date(data.timestamp);
+      const timestamp = data.timestamp;
       const now = new Date();
       const secondsAgo = Math.floor((now - timestamp) / 1000);
       
@@ -256,7 +256,7 @@
           </div>
           <div class="info-item">
             <div class="info-label">타임스탬프</div>
-            <div class="info-value">${timestamp.toLocaleTimeString('ko-KR')}</div>
+            <div class="info-value">${timestamp}</div>
           </div>
           <div class="info-item">
             <div class="info-label">수신 시간</div>

@@ -42,7 +42,11 @@ subClient.subscribe("new_block", (message) => {
 });
 
 io.on("connection", (socket) => {
-  console.log("🔌 client connected:", socket.id);
+  console.log("🔌 client connected:", socket.id, `(Total: ${io.sockets.sockets.size})`);
+  
+  socket.on("disconnect", () => {
+    console.log("🔌 client disconnected:", socket.id, `(Total: ${io.sockets.sockets.size})`);
+  });
 });
 
 httpServer.listen(PORT, () => {

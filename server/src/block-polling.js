@@ -22,19 +22,31 @@ console.log(`📍 Solana RPC: ${SOLANA_RPC_URL} (${SOLANA_POLL_INTERVAL}ms 간�
 // Polygon Amoy 네트워크 폴링
 async function pollPolygonBlock() {
   try {
-    const { data } = await axios.post(POLYGON_RPC_URL, {
+    // 1. 최신 블록 번호 가져오기
+    const blockNumberRes = await axios.post(POLYGON_RPC_URL, {
       jsonrpc: "2.0",
       id: 1,
       method: "eth_blockNumber",
       params: [],
     });
 
-    const blockNumber = parseInt(data.result, 16);
-    console.log("🔹 [Polygon] Latest block:", blockNumber);
+    const blockNumber = parseInt(blockNumberRes.data.result, 16);
+    
+    // 2. 블록 정보 가져오기 (타임스탬프 포함)
+    const blockInfoRes = await axios.post(POLYGON_RPC_URL, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "eth_getBlockByNumber",
+      params: [`0x${blockNumber.toString(16)}`, false],
+    });
+
+    const blockTimestamp = parseInt(blockInfoRes.data.result.timestamp, 16) * 1000; // 초 → 밀리초
+    console.log("🔹 [Polygon] Latest block:", blockNumber, "timestamp:", blockTimestamp);
+    
     await redis.publish("new_block", JSON.stringify({
       network: "Polygon Amoy",
       blockNumber: blockNumber,
-      timestamp: Date.now()
+      timestamp: blockTimestamp
     }));
   } catch (error) {
     console.error("❌ [Polygon] Error:", error.message);
@@ -44,19 +56,31 @@ async function pollPolygonBlock() {
 // Solana Devnet 네트워크 폴링
 async function pollSolanaSlot() {
   try {
-    const { data } = await axios.post(SOLANA_RPC_URL, {
+    // 1. 최신 슬롯 번호 가져오기
+    const slotRes = await axios.post(SOLANA_RPC_URL, {
       jsonrpc: "2.0",
       id: 1,
       method: "getSlot",
       params: [],
     });
 
-    const slotNumber = data.result;
-    console.log("🔹 [Solana] Latest slot:", slotNumber);
+    const slotNumber = slotRes.data.result;
+    
+    // 2. 슬롯의 타임스탬프 가져오기
+    const blockTimeRes = await axios.post(SOLANA_RPC_URL, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "getBlockTime",
+      params: [slotNumber],
+    });
+
+    const slotTimestamp = blockTimeRes.data.result * 1000; // 초 → 밀리초
+    console.log("🔹 [Solana] Latest slot:", slotNumber, "timestamp:", slotTimestamp);
+    
     await redis.publish("new_block", JSON.stringify({
       network: "Solana Devnet",
       blockNumber: slotNumber, // Solana는 slot을 blockNumber로 표시
-      timestamp: Date.now()
+      timestamp: slotTimestamp
     }));
   } catch (error) {
     console.error("❌ [Solana] Error:", error.message);
