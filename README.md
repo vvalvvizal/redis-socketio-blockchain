@@ -19,6 +19,7 @@ npm install
 ```bash
 POLYGON_RPC_URL=https://rpc-amoy.polygon.technology
 SOLANA_RPC_URL=https://api.devnet.solana.com
+SOLANA_WS_URL=wss://api.devnet.solana.com
 REDIS_URL=redis://localhost:6379
 PORT=4000
 ```
@@ -53,7 +54,7 @@ http://localhost:4000
 server/
 ├── src/
 │   ├── index.js          # Socket.IO 서버
-│   └── block-polling.js  # 블록 폴링 (Redis publish)
+│   └── block-polling.js  # 블록 폴링 (Redis Stream 적재)
 └── public/
     └── index.html        # 웹 클라이언트
 ```
@@ -62,16 +63,16 @@ server/
 
 ```
 ┌─────────────────────┐
-│  Block Polling      │  ← Polygon RPC (5초) / Solana RPC (0.5초)
+│  Block Polling      │  ← Polygon RPC (5초) / Solana WS (slotSubscribe)
 │  (polling.js)       │
 └──────────┬──────────┘
-           │ publish
+           │ XADD (append)
            ↓
     ┌──────────────┐
-    │    Redis     │  ← Pub/Sub 메시지 브로커
-    │   Pub/Sub    │
+    │    Redis     │  ← Streams: 이벤트 로그/재처리
+    │   Streams    │
     └──────┬───────┘
-           │ subscribe
+           │ XREADGROUP (consumer group)
            ↓
 ┌──────────────────────┐
 │  Socket.IO Server    │  ← HTTP 서버 + Socket.IO (포트 4000)
@@ -87,33 +88,33 @@ server/
 
 ### 데이터 흐름
 
-1. **block-polling.js**: Polygon & Solana RPC 호출 → Redis `new_block` 채널에 publish
-2. **index.js**: Redis에서 subscribe → Socket.IO로 모든 클라이언트에 `newBlock` 이벤트 전송
+1. **block-polling.js**: Polygon은 RPC 폴링(HTTP), Solana는 WS 구독(slotSubscribe) → Redis Stream(`blocks:stream`)에 `XADD`로 적재
+2. **index.js**: Redis Stream을 Consumer Group(`socketio`)으로 `XREADGROUP` 소비 → Socket.IO로 모든 클라이언트에 `newBlock` 이벤트 전송
 3. **index.html**: Socket.IO 클라이언트로 `newBlock` 이벤트 수신 → UI 업데이트
 
 ### 역할 분리
 
-- **block-polling.js**: 블록체인 RPC 폴링 및 Redis publish (독립 프로세스)
-- **index.js**: Redis subscribe + Socket.IO 서버 (HTTP + WebSocket)
+- **block-polling.js**: 블록체인 RPC 폴링 및 Redis Stream 적재 (독립 프로세스)
+- **index.js**: Redis Stream 소비 + Socket.IO 서버 (HTTP + WebSocket)
 - **index.html**: 실시간 블록 정보 표시 (정적 파일)
 
 ## ⚙️ 네트워크 설정
 
 ### 지원 네트워크
 
-| 네트워크 | RPC URL | 폴링 간격 | 블록/슬롯 생성 속도 | 타입 |
+| 네트워크 | 엔드포인트 | 수집 방식 | 블록/슬롯 생성 속도 | 타입 |
 |---------|---------|----------|-------------------|------|
-| **Polygon Amoy** | `https://rpc-amoy.polygon.technology` | 5초 | ~2초마다 블록 생성 | Testnet |
-| **Solana Devnet** | `https://api.devnet.solana.com` | 0.5초 (500ms) | ~400ms마다 슬롯 생성 | Testnet |
+| **Polygon Amoy** | `POLYGON_RPC_URL` | HTTP 폴링 (5초) | ~2초마다 블록 생성 | Testnet |
+| **Solana Devnet** | `SOLANA_WS_URL` | WS 구독 (`slotSubscribe`) | ~400ms마다 슬롯 생성 | Testnet |
 
 ### 폴링 전략
 
 - **Polygon**: 블록 생성 속도가 상대적으로 느리므로 5초 간격으로 폴링
-- **Solana**: 슬롯 생성 속도가 매우 빠르므로 0.5초 간격으로 폴링하여 최신 슬롯 추적
+- **Solana**: 슬롯 생성 속도가 매우 빠르므로 WebSocket 구독(`slotSubscribe`)으로 최신 슬롯을 수신
 
 ### 데이터 구조
 
-각 블록/슬롯 정보는 다음 형식으로 Redis에 publish됩니다:
+각 블록/슬롯 정보는 Redis Stream entry의 fields로 저장됩니다(문자열로 저장):
 
 ```json
 {
@@ -127,28 +128,35 @@ server/
 - `blockNumber`: 블록 번호 (Polygon) 또는 슬롯 번호 (Solana)
 - `timestamp`: 블록/슬롯의 실제 생성 타임스탬프 (UTC, 밀리초)
 
+추가로, 서버가 클라이언트로 emit 할 때는 Stream entry id를 `eventId`로 같이 내려줍니다.
+
 ## 💻 핵심 코드
 
-### Redis Pub/Sub
+### Redis Streams (권장: Stream-only)
 
-**block-polling.js** - 메시지 발행:
+**block-polling.js** - Stream 적재(`XADD`):
 ```javascript
-// RPC에서 블록 정보 가져온 후 Redis에 publish
-await redis.publish("new_block", JSON.stringify({
-  network: "Polygon Amoy",
-  blockNumber: blockNumber,
-  timestamp: Date.now()
-}));
+// RPC에서 블록 정보 가져온 후 Redis Stream에 적재
+await redis.sendCommand([
+  "XADD",
+  "blocks:stream",
+  "MAXLEN",
+  "~",
+  "10000",
+  "*",
+  "network",
+  "Polygon Amoy",
+  "blockNumber",
+  String(blockNumber),
+  "timestamp",
+  String(Date.now()),
+]);
 ```
 
-**index.js** - 메시지 구독:
+**index.js** - Consumer Group 소비(`XREADGROUP` + `XACK`):
 ```javascript
-// Redis에서 메시지 구독
-subClient.subscribe("new_block", (message) => {
-  const data = JSON.parse(message);
-  // Socket.IO로 모든 클라이언트에 전송
-  io.emit("newBlock", data);
-});
+// XGROUP CREATE blocks:stream socketio $ MKSTREAM (최초 1회)
+// XREADGROUP로 계속 읽어서 io.emit 한 뒤, 처리 완료 시 XACK
 ```
 
 ### Socket.IO
@@ -185,7 +193,7 @@ Socket.IO Redis Adapter를 사용하면:
 ### 예상되는 문제점
 
 1. **중복 블록 발행**
-   - 이전 블록 번호를 추적하지 않아 같은 블록이 여러 번 publish될 수 있음
+   - 이전 블록 번호를 추적하지 않으면 같은 블록이 여러 번 적재될 수 있음
    - 네트워크 지연 시 동일한 블록을 반복적으로 조회
 
 2. **타임스탬프 지연**
@@ -194,7 +202,7 @@ Socket.IO Redis Adapter를 사용하면:
 
 3. **RPC 호출 비효율**
    - 각 폴링마다 2번의 RPC 호출 (블록 번호 조회 + 블록 정보 조회)
-   - Solana의 경우 `getBlockTime`이 `null`을 반환할 수 있으나 처리되지 않음
+   - Solana는 WS 기반으로 전환되어 HTTP 폴링 호출은 하지 않음 (대신 WS 재연결 처리가 중요)
 
 4. **에러 처리 부족**
    - RPC 호출 실패 시 단순 로그만 출력하고 계속 폴링
@@ -208,6 +216,15 @@ Socket.IO Redis Adapter를 사용하면:
 ## 📚 참고 자료
 
 - [Socket.IO](https://socket.io/docs/v4/)
-- [Redis Pub/Sub](https://redis.io/docs/manual/pubsub/)
+- [Redis Streams](https://redis.io/docs/latest/develop/data-types/streams/)
 - [Polygon RPC](https://docs.polygon.technology/docs/develop/network-details/network/)
 - [Solana RPC](https://docs.solana.com/api/http)
+
+## 🔧 Streams 설정 (환경변수)
+
+아래는 선택 사항이며, 미설정 시 기본값이 사용됩니다:
+
+- `BLOCKS_STREAM_KEY`: Stream key (기본값: `blocks:stream`)
+- `BLOCKS_STREAM_GROUP`: Consumer group (기본값: `socketio`)
+- `BLOCKS_STREAM_CONSUMER`: Consumer name (기본값: `socketio-<pid>`)
+- `BLOCKS_STREAM_MAXLEN`: Stream 최대 길이 (기본값: `10000`, 근사 trim `MAXLEN ~`)
