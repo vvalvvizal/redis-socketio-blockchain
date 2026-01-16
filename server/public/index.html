@@ -95,6 +95,11 @@
       background: linear-gradient(to right, rgba(20, 241, 149, 0.05), transparent);
     }
 
+    .block-card.sui {
+      border-left: 4px solid #4da2ff;
+      background: linear-gradient(to right, rgba(77, 162, 255, 0.08), transparent);
+    }
+
     @keyframes slideIn {
       from {
         opacity: 0;
@@ -130,6 +135,10 @@
 
     .network-solana {
       color: #14f195;
+    }
+
+    .network-sui {
+      color: #4da2ff;
     }
 
     .block-badge {
@@ -197,7 +206,7 @@
   <div class="container">
     <header>
       <h1>실시간 블록 익스플로러</h1>
-      <p class="subtitle">Multi-Network: Polygon Amoy & Solana Devnet</p>
+      <p class="subtitle">Multi-Network: Polygon Amoy · Solana Devnet · Sui Testnet</p>
     </header>
 
     <div class="status">
@@ -238,9 +247,11 @@
       const secondsAgo = Math.floor((now - timestamp) / 1000);
       
       const isSolana = data.network.includes('Solana');
-      const blockLabel = isSolana ? 'Slot' : 'Block';
-      const networkClass = isSolana ? 'network-solana' : 'network-polygon';
-      const cardClass = isSolana ? 'solana' : 'polygon';
+      const isSui = data.network.includes('Sui');
+
+      const blockLabel = isSui ? 'Checkpoint' : (isSolana ? 'Slot' : 'Block');
+      const networkClass = isSui ? 'network-sui' : (isSolana ? 'network-solana' : 'network-polygon');
+      const cardClass = isSui ? 'sui' : (isSolana ? 'solana' : 'polygon');
       
       blockCard.className = `block-card ${cardClass}`;
       

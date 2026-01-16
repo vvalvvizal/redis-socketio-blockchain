@@ -7,11 +7,9 @@ dotenv.config();
 
 const POLYGON_RPC_URL = process.env.POLYGON_RPC_URL;
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL;
-const SOLANA_WS_URL =
-  process.env.SOLANA_WS_URL ||
-  (SOLANA_RPC_URL
-    ? SOLANA_RPC_URL.replace(/^https?:\/\//, (m) => (m === "https://" ? "wss://" : "ws://"))
-    : "wss://api.devnet.solana.com");
+const SOLANA_WS_URL = process.env.SOLANA_WS_URL;
+const SUI_GRAPHQL_URL =
+  process.env.SUI_GRAPHQL_URL;
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
 const redis = createClient({ url: REDIS_URL });
@@ -25,9 +23,9 @@ async function xaddBlockEvent(event) {
   // XADD <stream> MAXLEN ~ <N> * field value ...
   // node-redis 버전별 옵션 차이를 피하려고 sendCommand 사용
   await redis.sendCommand([
-    "XADD",
+    "XADD",//스트림 추가 명령어
     BLOCKS_STREAM_KEY,
-    "MAXLEN",
+    "MAXLEN",//최대길이
     "~",
     String(STREAM_MAXLEN),
     "*",
@@ -41,11 +39,13 @@ async function xaddBlockEvent(event) {
 }
 
 // 네트워크별 폴링 간격 (밀리초)
-const POLYGON_POLL_INTERVAL = 5000;  // 5초 (Polygon은 약 2초마다 블록 생성)
+const POLYGON_POLL_INTERVAL = Number(process.env.POLYGON_POLL_INTERVAL);
+const SUI_POLL_INTERVAL = Number(process.env.SUI_POLL_INTERVAL); 
 
 console.log("✅ Multi-Network Block Polling started");
 console.log(`📍 Polygon RPC: ${POLYGON_RPC_URL} (${POLYGON_POLL_INTERVAL}ms 간격)`);
 console.log(`📍 Solana WS: ${SOLANA_WS_URL} (slotSubscribe)`);
+console.log(`📍 Sui GraphQL: ${SUI_GRAPHQL_URL} (${SUI_POLL_INTERVAL}ms 간격)`);
 console.log(`🧾 Redis Stream: ${BLOCKS_STREAM_KEY} (MAXLEN ~ ${STREAM_MAXLEN})`);
 
 // Polygon Amoy 네트워크 폴링
@@ -85,6 +85,42 @@ async function pollPolygonBlock() {
     });
   } catch (error) {
     console.error("❌ [Polygon] Error:", error.message);
+  }
+}
+
+// Sui (GraphQL RPC) 체크포인트 폴링
+async function pollSuiCheckpoint() {
+  try {
+    // 최신 체크포인트: query { checkpoint { sequenceNumber } }
+    // ref: https://docs.sui.io/concepts/data-access/graphql-rpc
+    const res = await axios.post(
+      SUI_GRAPHQL_URL,
+      {
+        query: "query { checkpoint { sequenceNumber } }",
+      },
+      { headers: { "Content-Type": "application/json" } }
+    );
+    const seqStr = res?.data?.data?.checkpoint?.sequenceNumber;
+    const seq = Number(seqStr);
+    if (!Number.isFinite(seq)) {
+      throw new Error(`Invalid checkpoint sequenceNumber: ${seqStr}`);
+    }
+
+    const lastKey = "lastBlock:sui";
+    const last = await redis.get(lastKey);
+    if (last && Number(last) === seq) return;
+
+    const ts = Date.now();
+    console.log("🔹 [Sui] Latest checkpoint:", seq, "recvTimestamp:", ts);
+
+    await redis.set(lastKey, String(seq));
+    await xaddBlockEvent({
+      network: "Sui Testnet",
+      blockNumber: seq,
+      timestamp: ts,
+    });
+  } catch (error) {
+    console.error("❌ [Sui] Error:", error?.message || error);
   }
 }
 
@@ -229,7 +265,9 @@ function startSolanaSlotSubscription() {
 // 각 네트워크를 독립적으로 폴링 (다른 간격으로)
 // 즉시 한 번 실행
 pollPolygonBlock();
+pollSuiCheckpoint();
 startSolanaSlotSubscription();
-
-// Polygon: 5초마다 폴링
+ 
 setInterval(pollPolygonBlock, POLYGON_POLL_INTERVAL);
+
+setInterval(pollSuiCheckpoint, SUI_POLL_INTERVAL);

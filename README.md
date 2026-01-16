@@ -20,6 +20,8 @@ npm install
 POLYGON_RPC_URL=https://rpc-amoy.polygon.technology
 SOLANA_RPC_URL=https://api.devnet.solana.com
 SOLANA_WS_URL=wss://api.devnet.solana.com
+SUI_GRAPHQL_URL=https://graphql.testnet.sui.io/graphql
+SUI_POLL_INTERVAL=2000
 REDIS_URL=redis://localhost:6379
 PORT=4000
 ```
@@ -63,7 +65,7 @@ server/
 
 ```
 ┌─────────────────────┐
-│  Block Polling      │  ← Polygon RPC (5초) / Solana WS (slotSubscribe)
+│  Block Polling      │  ← Polygon RPC (5초) / Solana WS (slotSubscribe) / Sui GraphQL (2초)
 │  (polling.js)       │
 └──────────┬──────────┘
            │ XADD (append)
@@ -88,7 +90,7 @@ server/
 
 ### 데이터 흐름
 
-1. **block-polling.js**: Polygon은 RPC 폴링(HTTP), Solana는 WS 구독(slotSubscribe) → Redis Stream(`blocks:stream`)에 `XADD`로 적재
+1. **block-polling.js**: Polygon(HTTP 폴링) + Solana(WS 구독) + Sui(GraphQL 폴링) → Redis Stream(`blocks:stream`)에 `XADD`로 적재
 2. **index.js**: Redis Stream을 Consumer Group(`socketio`)으로 `XREADGROUP` 소비 → Socket.IO로 모든 클라이언트에 `newBlock` 이벤트 전송
 3. **index.html**: Socket.IO 클라이언트로 `newBlock` 이벤트 수신 → UI 업데이트
 
@@ -106,6 +108,7 @@ server/
 |---------|---------|----------|-------------------|------|
 | **Polygon Amoy** | `POLYGON_RPC_URL` | HTTP 폴링 (5초) | ~2초마다 블록 생성 | Testnet |
 | **Solana Devnet** | `SOLANA_WS_URL` | WS 구독 (`slotSubscribe`) | ~400ms마다 슬롯 생성 | Testnet |
+| **Sui Testnet** | `SUI_GRAPHQL_URL` | GraphQL 폴링 (`checkpoint { sequenceNumber }`) | 네트워크 상황에 따라 변동 | Testnet |
 
 ### 폴링 전략
 
@@ -228,3 +231,8 @@ Socket.IO Redis Adapter를 사용하면:
 - `BLOCKS_STREAM_GROUP`: Consumer group (기본값: `socketio`)
 - `BLOCKS_STREAM_CONSUMER`: Consumer name (기본값: `socketio-<pid>`)
 - `BLOCKS_STREAM_MAXLEN`: Stream 최대 길이 (기본값: `10000`, 근사 trim `MAXLEN ~`)
+
+## 🔧 Sui 설정 (환경변수)
+
+- `SUI_GRAPHQL_URL`: Sui GraphQL RPC 엔드포인트 (기본값: `https://graphql.testnet.sui.io/graphql`)
+- `SUI_POLL_INTERVAL`: 체크포인트 폴링 간격(ms) (기본값: `2000`)
