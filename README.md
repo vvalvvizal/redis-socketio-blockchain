@@ -20,6 +20,7 @@ npm install
 POLYGON_RPC_URL=https://rpc-amoy.polygon.technology
 SOLANA_RPC_URL=https://api.devnet.solana.com
 SOLANA_WS_URL=wss://api.devnet.solana.com
+SOLANA_POLL_INTERVAL=500
 SUI_GRAPHQL_URL=https://graphql.testnet.sui.io/graphql
 SUI_POLL_INTERVAL=2000
 REDIS_URL=redis://localhost:6379
