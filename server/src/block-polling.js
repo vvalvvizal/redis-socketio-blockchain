@@ -1,7 +1,8 @@
 import { createClient } from "redis";
 import axios from "axios";
 import dotenv from "dotenv";
-import WebSocket from "ws";
+import SolanaSlotSubscriber from "./solanaRPCSubscriber.js";
+//import SolanaBlockSubscriber from "./solanaBlockSubscriber.js";
 
 dotenv.config();
 
@@ -18,6 +19,176 @@ await redis.connect();
 // Redis Stream 설정
 const BLOCKS_STREAM_KEY = process.env.BLOCKS_STREAM_KEY || "blocks:stream";
 const STREAM_MAXLEN = Number(process.env.BLOCKS_STREAM_MAXLEN || 10000);
+const SOLANA_RECONCILE_INTERVAL = Number(
+  process.env.SOLANA_RECONCILE_INTERVAL || 5000
+);
+const SOLANA_ENABLE_TOKEN_BLOCKSUB = String(process.env.SOLANA_ENABLE_TOKEN_BLOCKSUB || "false").toLowerCase() === "true";
+const SOLANA_USDT_MINT = process.env.SOLANA_USDT_MINT; // base58 mint address
+const SOLANA_USDT_STREAM_KEY = process.env.SOLANA_USDT_STREAM_KEY || "solana:usdt:transfers";
+const SOLANA_USDC_MINT = process.env.SOLANA_USDC_MINT; // base58 mint address
+const SOLANA_USDC_STREAM_KEY = process.env.SOLANA_USDC_STREAM_KEY || "solana:usdc:transfers";
+const SOLANA_TOKEN_PROGRAM_ID =
+  process.env.SOLANA_TOKEN_PROGRAM_ID || "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const SOLANA_BLOCKSUB_MENTIONS =
+  process.env.SOLANA_BLOCKSUB_MENTIONS || SOLANA_TOKEN_PROGRAM_ID; // program or account pubkey (base58)
+const SOLANA_BLOCKSUB_COMMITMENT = process.env.SOLANA_BLOCKSUB_COMMITMENT || "finalized";
+
+function asPubkeyString(k) {
+  if (!k) return null;
+  if (typeof k === "string") return k;
+  if (typeof k?.pubkey === "string") return k.pubkey;
+  return null;
+}
+
+function extractTokenTransfersFromTx(tx, { tokenProgramId, targetMint }) {
+  const out = [];
+  const meta = tx?.meta;
+  const message = tx?.transaction?.message;
+  const accountKeys = Array.isArray(message?.accountKeys) ? message.accountKeys : [];
+
+  // token account -> mint mapping from pre/post balances
+  const tokenBalances = [
+    ...(Array.isArray(meta?.preTokenBalances) ? meta.preTokenBalances : []),
+    ...(Array.isArray(meta?.postTokenBalances) ? meta.postTokenBalances : []),
+  ];
+  const tokenAccountToMint = new Map();
+  for (const b of tokenBalances) {
+    const idx = b?.accountIndex;
+    const mint = b?.mint;
+    if (typeof idx !== "number" || typeof mint !== "string") continue;
+    const pk = asPubkeyString(accountKeys[idx]);
+    if (!pk) continue;
+    if (!tokenAccountToMint.has(pk)) tokenAccountToMint.set(pk, mint);
+  }
+
+  const collectFromInstructions = (instructions, isInner) => {
+    if (!Array.isArray(instructions)) return;
+    for (const ix of instructions) {
+      // jsonParsed: { programId, parsed: { type, info } }
+      const programId = ix?.programId || ix?.programIdIndex; // programIdIndex for non-parsed
+      const parsed = ix?.parsed;
+      const type = parsed?.type;
+      const info = parsed?.info;
+
+      // When encoding=jsonParsed, programId is usually base58 string
+      if (typeof programId === "string" && programId !== tokenProgramId) continue;
+      if (!parsed || typeof type !== "string" || !info) continue;
+
+      if (type !== "transfer" && type !== "transferChecked") continue;
+
+      const source = info?.source;
+      const destination = info?.destination;
+      const authority = info?.authority;
+      const amountRaw = info?.amount; // string for transfer, or string for transferChecked (uiAmountString sometimes)
+      const mint = info?.mint || tokenAccountToMint.get(source) || tokenAccountToMint.get(destination) || null;
+
+      if (!source || !destination) continue;
+      if (targetMint && mint !== targetMint) continue;
+
+      out.push({
+        signature: Array.isArray(tx?.transaction?.signatures) ? tx.transaction.signatures[0] : undefined,
+        slot: meta?.slot,
+        source,
+        destination,
+        authority,
+        amount: amountRaw != null ? String(amountRaw) : null,
+        mint,
+        isInner: Boolean(isInner),
+      });
+    }
+  };
+
+  // top-level instructions
+  collectFromInstructions(message?.instructions, false);
+
+  // inner instructions (CPI)
+  const inner = Array.isArray(meta?.innerInstructions) ? meta.innerInstructions : [];
+  for (const ii of inner) {
+    collectFromInstructions(ii?.instructions, true);
+  }
+
+  return out;
+}
+
+async function xaddUsdtTransferEvent(event) {
+  // Store transfer events in a dedicated stream (separate from blocks:stream)
+  await redis.sendCommand([
+    "XADD",
+    SOLANA_USDT_STREAM_KEY,
+    "MAXLEN",
+    "~",
+    String(STREAM_MAXLEN),
+    "*",
+    "network",
+    "Solana USDT Transfer",
+    "slot",
+    String(event.slot ?? ""),
+    "signature",
+    String(event.signature ?? ""),
+    "source",
+    String(event.source ?? ""),
+    "destination",
+    String(event.destination ?? ""),
+    "authority",
+    String(event.authority ?? ""),
+    "mint",
+    String(event.mint ?? ""),
+    "amount",
+    String(event.amount ?? ""),
+    "timestamp",
+    String(event.timestamp ?? Date.now()),
+  ]);
+}
+
+async function xaddUsdcTransferEvent(event) {
+  await redis.sendCommand([
+    "XADD",
+    SOLANA_USDC_STREAM_KEY,
+    "MAXLEN",
+    "~",
+    String(STREAM_MAXLEN),
+    "*",
+    "network",
+    "Solana USDC Transfer",
+    "slot",
+    String(event.slot ?? ""),
+    "signature",
+    String(event.signature ?? ""),
+    "source",
+    String(event.source ?? ""),
+    "destination",
+    String(event.destination ?? ""),
+    "authority",
+    String(event.authority ?? ""),
+    "mint",
+    String(event.mint ?? ""),
+    "amount",
+    String(event.amount ?? ""),
+    "timestamp",
+    String(event.timestamp ?? Date.now()),
+  ]);
+}
+
+
+async function rpcHttpCall(rpcUrl, method, params = []) {
+  if (!rpcUrl) throw new Error(`RPC url is not set for method=${method}`);
+
+  const { data } = await axios.post(rpcUrl, {
+    jsonrpc: "2.0",
+    id: 1,
+    method,
+    params,
+  });
+
+  if (data?.error) {
+    const msg = data.error?.message || JSON.stringify(data.error);
+    throw new Error(`RPC error method=${method}: ${msg}`);
+  }
+
+  return data?.result;
+}
+
+
 
 async function xaddBlockEvent(event) {
   // XADD <stream> MAXLEN ~ <N> * field value ...
@@ -42,39 +213,24 @@ async function xaddBlockEvent(event) {
 const POLYGON_POLL_INTERVAL = Number(process.env.POLYGON_POLL_INTERVAL);
 const SUI_POLL_INTERVAL = Number(process.env.SUI_POLL_INTERVAL); 
 
-console.log("✅ Multi-Network Block Polling started");
-console.log(`📍 Polygon RPC: ${POLYGON_RPC_URL} (${POLYGON_POLL_INTERVAL}ms 간격)`);
-console.log(`📍 Solana WS: ${SOLANA_WS_URL} (slotSubscribe)`);
-console.log(`📍 Sui GraphQL: ${SUI_GRAPHQL_URL} (${SUI_POLL_INTERVAL}ms 간격)`);
-console.log(`🧾 Redis Stream: ${BLOCKS_STREAM_KEY} (MAXLEN ~ ${STREAM_MAXLEN})`);
-
-// Polygon Amoy 네트워크 폴링
 async function pollPolygonBlock() {
   try {
     // 1. 최신 블록 번호 가져오기
-    const blockNumberRes = await axios.post(POLYGON_RPC_URL, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_blockNumber",
-      params: [],
-    });
-
-    const blockNumber = parseInt(blockNumberRes.data.result, 16);
+    const blockNumberHex = await rpcHttpCall(POLYGON_RPC_URL, "eth_blockNumber", []);
+    if (!blockNumberHex) return;
+    const blockNumber = parseInt(String(blockNumberHex), 16);
 
     // 중복 발행 방지 (폴링 주기 동안 같은 블록이면 스킵)
     const lastKey = "lastBlock:polygon";
     const last = await redis.get(lastKey);
     if (last && Number(last) === blockNumber) return;
     
-    // 2. 블록 정보 가져오기 (타임스탬프 포함)
-    const blockInfoRes = await axios.post(POLYGON_RPC_URL, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "eth_getBlockByNumber",
-      params: [`0x${blockNumber.toString(16)}`, false],
-    });
+    const blockInfo = await rpcHttpCall(POLYGON_RPC_URL, "eth_getBlockByNumber", [
+      `0x${blockNumber.toString(16)}`,
+      false,
+    ]);
 
-    const blockTimestamp = parseInt(blockInfoRes.data.result.timestamp, 16) * 1000; // 초 → 밀리초
+    const blockTimestamp = parseInt(String(blockInfo?.timestamp), 16) * 1000; // 초 → 밀리초
     console.log("🔹 [Polygon] Latest block:", blockNumber, "timestamp:", blockTimestamp);
 
     await redis.set(lastKey, String(blockNumber));
@@ -84,7 +240,7 @@ async function pollPolygonBlock() {
       timestamp: blockTimestamp,
     });
   } catch (error) {
-    console.error("❌ [Polygon] Error:", error.message);
+    console.error("❌ [Polygon] Error:", error?.message || error);
   }
 }
 
@@ -127,146 +283,134 @@ async function pollSuiCheckpoint() {
 // Solana Devnet: WebSocket 구독으로 슬롯 이벤트 수신 (HTTP 폴링 제거)
 const SOLANA_LAST_KEY = "lastBlock:solana";
 let lastSolanaSlot = Number((await redis.get(SOLANA_LAST_KEY)) || 0);
+//마지막으로 받은 Solana 슬롯 번호를 저장
+
 
 function startSolanaSlotSubscription() {
-  let ws;
-  let reconnectTimer = null;
-  let subscribed = false;
-  let subscribeAckTimer = null;
-  let subscribeAttempts = 0;
-  let reqId = 1;
+  const subscriber = new SolanaSlotSubscriber({
+    wsUrl: SOLANA_WS_URL,
+    rpcUrl: SOLANA_RPC_URL,
+    reconcileIntervalMs: SOLANA_RECONCILE_INTERVAL,
+    rpcHttpCall,
+    getLastSlot: () => lastSolanaSlot,
+    setLastSlot: (slot) => {
+      lastSolanaSlot = slot;
+    },
+    onSlot: async (slot, ts) => {
+      // at-least-once 보장(중복 가능, 누락 방지)
+      await xaddBlockEvent({
+        network: "Solana Devnet",
+        blockNumber: slot,
+        timestamp: ts ?? Date.now(),
+      });
+      await redis.set(SOLANA_LAST_KEY, String(slot));
+    },
+  });
 
-  const connect = () => {
-    subscribeAttempts = 0;
-    reqId = Math.floor(Date.now() % 1_000_000_000);
-    ws = new WebSocket(SOLANA_WS_URL);
-
-    ws.on("open", () => {
-      subscribed = false;
-      console.log("✅ [Solana] WS connected");
-
-      const sendSubscribe = () => {
-        subscribeAttempts += 1;
-        reqId += 1;
-        const currentReqId = reqId;
-
-        if (subscribeAckTimer) clearTimeout(subscribeAckTimer);
-        subscribeAckTimer = setTimeout(() => {
-          if (subscribed) return;
-          if (subscribeAttempts < 3) {
-            console.error(
-              `❌ [Solana] slotSubscribe ACK timeout (attempt ${subscribeAttempts}). Retrying...`
-            );
-            sendSubscribe();
-            return;
-          }
-
-          console.error("❌ [Solana] slotSubscribe failed after retries. Reconnecting...");
-          try {
-            ws.terminate?.();
-          } catch {
-            try {
-              ws.close?.();
-            } catch {}
-          }
-        }, 15000);
-
-        console.log(
-          `➡️  [Solana] slotSubscribe request sent (id=${currentReqId}, attempt=${subscribeAttempts})`
-        );
-        ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: currentReqId,
-            method: "slotSubscribe",
-          })
-        );
-      };
-
-      sendSubscribe();
-    });
-
-    ws.on("message", async (raw) => {
-      let msg;
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        return;
-      }
-
-      // 구독 응답
-      if (
-        typeof msg?.id === "number" &&
-        Object.prototype.hasOwnProperty.call(msg, "result") &&
-        !subscribed
-      ) {
-        subscribed = true;
-        if (subscribeAckTimer) {
-          clearTimeout(subscribeAckTimer);
-          subscribeAckTimer = null;
-        }
-        console.log("✅ [Solana] slotSubscribe OK, subscription id:", msg.result);
-        return;
-      }
-
-      // 에러 응답 로깅(구독 실패 등)
-      if (msg?.error) {
-        console.error("❌ [Solana] WS error message:", msg.error);
-      }
-
-      // 슬롯 알림
-      if (msg?.method === "slotNotification") {
-        const slot = msg?.params?.result?.slot;
-        if (typeof slot !== "number") return;
-        if (slot <= lastSolanaSlot) return;
-
-        lastSolanaSlot = slot;
-        const slotTimestamp = Date.now(); // WS 수신 시각(HTTP getBlockTime 요청 제거)
-        console.log("🔹 [Solana] New slot:", slot, "recvTimestamp:", slotTimestamp);
-
-        try {
-          await redis.set(SOLANA_LAST_KEY, String(slot));
-          await xaddBlockEvent({
-            network: "Solana Devnet",
-            blockNumber: slot,
-            timestamp: slotTimestamp,
-          });
-        } catch (e) {
-          console.error("❌ [Solana] Redis Stream write error:", e?.message || e);
-        }
-      }
-    });
-
-    const scheduleReconnect = (reason) => {
-      if (reconnectTimer) return;
-      if (subscribeAckTimer) {
-        clearTimeout(subscribeAckTimer);
-        subscribeAckTimer = null;
-      }
-      console.error("❌ [Solana] WS disconnected:", reason);
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, 1000);
-    };
-
-    ws.on("unexpected-response", (_req, res) => {
-      console.error("❌ [Solana] WS unexpected response:", res?.statusCode, res?.statusMessage);
-    });
-    ws.on("error", (err) => scheduleReconnect(err?.message || err));
-    ws.on("close", (code, reason) =>
-      scheduleReconnect(`${code} ${reason?.toString?.() || ""}`.trim())
-    );
-  };
-
-  connect();
+  subscriber.start();
 }
+
+// function startSolanaUsdtBlockSubscription() {
+//   if (!SOLANA_ENABLE_TOKEN_BLOCKSUB) return;
+//   if (!SOLANA_WS_URL) {
+//     console.error("❌ [Solana][blockSubscribe] SOLANA_WS_URL is not set");
+//     return;
+//   }
+//   if (!SOLANA_USDT_MINT) {
+//     console.error("❌ [Solana][blockSubscribe] SOLANA_USDT_MINT is not set (base58 mint address)");
+//     return;
+//   }
+
+//   const subscriber = new SolanaBlockSubscriber({
+//     wsUrl: SOLANA_WS_URL,
+//     subscriptions: [
+//       {
+//         name: "USDT",
+//         mentionsAccountOrProgram: SOLANA_BLOCKSUB_MENTIONS,
+//         onBlockNotification: async (msg) => {
+//           const value = msg?.params?.result?.value;
+//           const slot = value?.slot;
+//           const block = value?.block;
+//           const blockTime = block?.blockTime ? Number(block.blockTime) * 1000 : Date.now();
+//           const txs = Array.isArray(block?.transactions) ? block.transactions : [];
+
+//           let transferCount = 0;
+//           for (const tx of txs) {
+//             const transfers = extractTokenTransfersFromTx(tx, {
+//               tokenProgramId: SOLANA_TOKEN_PROGRAM_ID,
+//               targetMint: SOLANA_USDT_MINT,
+//             });
+//             for (const t of transfers) {
+//               transferCount += 1;
+//               await xaddUsdtTransferEvent({
+//                 ...t,
+//                 slot: typeof slot === "number" ? slot : undefined,
+//                 timestamp: blockTime,
+//               });
+//             }
+//           }
+
+//           if (transferCount > 0) {
+//             console.log(
+//               `🧾 [Solana][USDT] transfers in slot=${slot}: ${transferCount} (stream=${SOLANA_USDT_STREAM_KEY})`
+//             );
+//           }
+//         },
+//       },
+//       ...(SOLANA_USDC_MINT
+//         ? [
+//             {
+//               name: "USDC",
+//               mentionsAccountOrProgram: SOLANA_BLOCKSUB_MENTIONS,
+//               onBlockNotification: async (msg) => {
+//                 const value = msg?.params?.result?.value;
+//                 const slot = value?.slot;
+//                 const block = value?.block;
+//                 const blockTime = block?.blockTime ? Number(block.blockTime) * 1000 : Date.now();
+//                 const txs = Array.isArray(block?.transactions) ? block.transactions : [];
+
+//                 let transferCount = 0;
+//                 for (const tx of txs) {
+//                   const transfers = extractTokenTransfersFromTx(tx, {
+//                     tokenProgramId: SOLANA_TOKEN_PROGRAM_ID,
+//                     targetMint: SOLANA_USDC_MINT,
+//                   });
+//                   for (const t of transfers) {
+//                     transferCount += 1;
+//                     await xaddUsdcTransferEvent({
+//                       ...t,
+//                       slot: typeof slot === "number" ? slot : undefined,
+//                       timestamp: blockTime,
+//                     });
+//                   }
+//                 }
+
+//                 if (transferCount > 0) {
+//                   console.log(
+//                     `🧾 [Solana][USDC] transfers in slot=${slot}: ${transferCount} (stream=${SOLANA_USDC_STREAM_KEY})`
+//                   );
+//                 }
+//               },
+//             },
+//           ]
+//         : []),
+//     ],
+//     commitment: SOLANA_BLOCKSUB_COMMITMENT,
+//     encoding: "jsonParsed",
+//     transactionDetails: "full",
+//     showRewards: false,
+//     maxSupportedTransactionVersion: 0,
+//   });
+
+//   subscriber.start();
+// }
 
 // 각 네트워크를 독립적으로 폴링 (다른 간격으로)
 // 즉시 한 번 실행
 pollPolygonBlock();
 pollSuiCheckpoint();
 startSolanaSlotSubscription();
+//startSolanaUsdtBlockSubscription();
  
 setInterval(pollPolygonBlock, POLYGON_POLL_INTERVAL);
 

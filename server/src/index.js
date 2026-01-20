@@ -19,6 +19,10 @@ const BLOCKS_STREAM_GROUP = process.env.BLOCKS_STREAM_GROUP || "socketio";
 const BLOCKS_STREAM_CONSUMER =
   process.env.BLOCKS_STREAM_CONSUMER ||
   `socketio-${process.pid}`;
+const SOLANA_USDT_STREAM_KEY =
+  process.env.SOLANA_USDT_STREAM_KEY || "solana:usdt:transfers";
+const SOLANA_USDC_STREAM_KEY =
+  process.env.SOLANA_USDC_STREAM_KEY || "solana:usdc:transfers";
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -51,31 +55,32 @@ function fieldsArrayToObject(fields) {
 }
 
 async function ensureConsumerGroup() {
-  try {
-    // XGROUP CREATE <stream> <group> $ MKSTREAM
-    await streamClient.sendCommand([
-      "XGROUP",
-      "CREATE",
-      BLOCKS_STREAM_KEY,
-      BLOCKS_STREAM_GROUP,
-      "$",
-      "MKSTREAM",
-    ]);
-    console.log(
-      `✅ Redis Stream group created: ${BLOCKS_STREAM_KEY} / ${BLOCKS_STREAM_GROUP}`
-    );
-  } catch (err) {
-    // 이미 존재하면 BUSYGROUP 에러
-    const msg = String(err?.message || err);
-    if (!msg.includes("BUSYGROUP")) throw err;
+  const keys = [BLOCKS_STREAM_KEY, SOLANA_USDT_STREAM_KEY, SOLANA_USDC_STREAM_KEY];
+  for (const key of keys) {
+    try {
+      // XGROUP CREATE <stream> <group> $ MKSTREAM
+      await streamClient.sendCommand([
+        "XGROUP",
+        "CREATE",
+        key,
+        BLOCKS_STREAM_GROUP,
+        "$",
+        "MKSTREAM",
+      ]);
+      console.log(`✅ Redis Stream group created: ${key} / ${BLOCKS_STREAM_GROUP}`);
+    } catch (err) {
+      // 이미 존재하면 BUSYGROUP 에러
+      const msg = String(err?.message || err);
+      if (!msg.includes("BUSYGROUP")) throw err;
+    }
   }
 }
 
-async function ackIds(ids) {
+async function ackIds(streamKey, ids) {
   if (!ids.length) return;
   await streamClient.sendCommand([
     "XACK",
-    BLOCKS_STREAM_KEY,
+    streamKey,
     BLOCKS_STREAM_GROUP,
     ...ids,
   ]);
@@ -84,49 +89,13 @@ async function ackIds(ids) {
 async function consumeStreamForever() {
   await ensureConsumerGroup();
   console.log(
-    `📥 Stream consumer started: ${BLOCKS_STREAM_KEY} group=${BLOCKS_STREAM_GROUP} consumer=${BLOCKS_STREAM_CONSUMER}`
+    `📥 Stream consumer started: group=${BLOCKS_STREAM_GROUP} consumer=${BLOCKS_STREAM_CONSUMER}`
   );
 
   while (true) {
     try {
-      // 1) 오래된 pending 메시지 reclaim (Redis 6.2+)
-      // XAUTOCLAIM <key> <group> <consumer> <min-idle-ms> <start> COUNT <n>
-      try {
-        const claimRes = await streamClient.sendCommand([
-          "XAUTOCLAIM",
-          BLOCKS_STREAM_KEY,
-          BLOCKS_STREAM_GROUP,
-          BLOCKS_STREAM_CONSUMER,
-          "60000",
-          "0-0",
-          "COUNT",
-          "100",
-        ]);
-
-        const claimed = claimRes?.[1] || [];
-        const ackList = [];
-        for (const entry of claimed) {
-          const [id, fields] = entry;
-          const data = fieldsArrayToObject(fields);
-          const event = {
-            network: data.network,
-            blockNumber: Number(data.blockNumber),
-            timestamp: Number(data.timestamp) || Date.now(),
-            eventId: id,
-          };
-          console.log(`📡 [Server][reclaim] ${event.network} - ${event.blockNumber}`);
-          io.emit("newBlock", event);
-          ackList.push(id);
-        }
-        await ackIds(ackList);
-      } catch (e) {
-        // Redis 버전이 낮아 XAUTOCLAIM이 없을 수 있으니 무시하고 계속 진행
-        const msg = String(e?.message || e);
-        if (!msg.toLowerCase().includes("unknown command")) throw e;
-      }
-
-      // 2) 새 메시지 블로킹 읽기
-      // XREADGROUP GROUP <group> <consumer> COUNT <n> BLOCK <ms> STREAMS <key> >
+      // 새 메시지 블로킹 읽기 (3개 stream 동시 소비)
+      // XREADGROUP GROUP <group> <consumer> COUNT <n> BLOCK <ms> STREAMS <k1> <k2> <k3> > > >
       const res = await streamClient.sendCommand([
         "XREADGROUP",
         "GROUP",
@@ -138,29 +107,61 @@ async function consumeStreamForever() {
         "5000",
         "STREAMS",
         BLOCKS_STREAM_KEY,
+        SOLANA_USDT_STREAM_KEY,
+        SOLANA_USDC_STREAM_KEY,
+        ">",
+        ">",
         ">",
       ]);
 
       if (!res) continue; // timeout
 
-      const ackList = [];
-      for (const stream of res) {
-        const entries = stream?.[1] || [];
+      const ackByStream = new Map();
+      for (const streamRes of res) {
+        const streamKey = streamRes?.[0];
+        const entries = streamRes?.[1] || [];
         for (const entry of entries) {
           const [id, fields] = entry;
           const data = fieldsArrayToObject(fields);
-          const event = {
-            network: data.network,
-            blockNumber: Number(data.blockNumber),
-            timestamp: Number(data.timestamp) || Date.now(),
-            eventId: id,
-          };
-          console.log(`📡 [Server] ${event.network} - Block/Slot: ${event.blockNumber}`);
-          io.emit("newBlock", event);
-          ackList.push(id);
+
+          if (streamKey === BLOCKS_STREAM_KEY) {
+            const event = {
+              network: data.network,
+              blockNumber: Number(data.blockNumber),
+              timestamp: Number(data.timestamp) || Date.now(),
+              eventId: id,
+            };
+            console.log(`📡 [Server] ${event.network} - Block/Slot: ${event.blockNumber}`);
+            io.emit("newBlock", event);
+          } else {
+            const token = String(data.network || "")
+              .toUpperCase()
+              .includes("USDC")
+              ? "USDC"
+              : "USDT";
+            const event = {
+              token,
+              slot: Number(data.slot),
+              signature: data.signature,
+              source: data.source,
+              destination: data.destination,
+              authority: data.authority,
+              mint: data.mint,
+              amount: data.amount,
+              timestamp: Number(data.timestamp) || Date.now(),
+              eventId: id,
+            };
+            io.emit("newTransfer", event);
+          }
+
+          const arr = ackByStream.get(streamKey) || [];
+          arr.push(id);
+          ackByStream.set(streamKey, arr);
         }
       }
-      await ackIds(ackList);
+      for (const [streamKey, ids] of ackByStream.entries()) {
+        await ackIds(streamKey, ids);
+      }
     } catch (err) {
       console.error("❌ Stream consume error:", err?.message || err);
       await sleep(1000);

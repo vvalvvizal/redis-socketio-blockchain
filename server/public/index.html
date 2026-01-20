@@ -76,6 +76,46 @@
       gap: 12px;
     }
 
+    .section-title {
+      margin-top: 24px;
+      margin-bottom: 12px;
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #111;
+    }
+
+    .transfers-container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .transfer-card {
+      border: 2px solid #e5e5e5;
+      border-radius: 6px;
+      padding: 14px 18px;
+      transition: all 0.2s ease;
+      animation: slideIn 0.3s ease;
+      border-left: 4px solid #111;
+      background: linear-gradient(to right, rgba(17, 17, 17, 0.04), transparent);
+    }
+
+    .transfer-card.usdt {
+      border-left-color: #16a34a;
+      background: linear-gradient(to right, rgba(22, 163, 74, 0.06), transparent);
+    }
+
+    .transfer-card.usdc {
+      border-left-color: #2563eb;
+      background: linear-gradient(to right, rgba(37, 99, 235, 0.06), transparent);
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.9rem;
+    }
+
     .block-card {
       border: 2px solid #e5e5e5;
       border-radius: 6px;
@@ -217,14 +257,21 @@
     <div class="blocks-container" id="blocks">
       <div class="no-blocks">블록 정보를 기다리는 중...</div>
     </div>
+
+    <div class="section-title">Solana 토큰 전송 (USDT/USDC)</div>
+    <div class="transfers-container" id="transfers">
+      <div class="no-blocks">전송 이벤트를 기다리는 중...</div>
+    </div>
   </div>
 
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <script>
     const socket = io("http://localhost:4000");
     const blocksContainer = document.getElementById("blocks");
+    const transfersContainer = document.getElementById("transfers");
     const connectionStatus = document.getElementById("connection-status");
     let blockCount = 0;
+    let transferCount = 0;
 
     socket.on("connect", () => {
       connectionStatus.textContent = "연결됨";
@@ -287,6 +334,71 @@
 
       while (blocksContainer.children.length > 20) {
         blocksContainer.removeChild(blocksContainer.lastChild);
+      }
+    });
+
+    function short(s) {
+      if (!s || typeof s !== "string") return "";
+      if (s.length <= 12) return s;
+      return `${s.slice(0, 6)}...${s.slice(-4)}`;
+    }
+
+    socket.on("newTransfer", (data) => {
+      if (transferCount === 0) {
+        transfersContainer.innerHTML = "";
+      }
+      transferCount++;
+
+      const token = (data.token || "").toUpperCase();
+      const cardClass = token === "USDC" ? "usdc" : "usdt";
+
+      const card = document.createElement("div");
+      card.className = `transfer-card ${cardClass}`;
+
+      const slot = data.slot ?? "";
+      const amount = data.amount ?? "";
+      const signature = data.signature ?? "";
+      const source = data.source ?? "";
+      const destination = data.destination ?? "";
+
+      card.innerHTML = `
+        <div class="block-header">
+          <div class="block-number">${token} Transfer</div>
+          <div class="block-badge">NEW</div>
+        </div>
+        <div class="block-info">
+          <div class="info-item">
+            <div class="info-label">slot</div>
+            <div class="info-value mono">${slot}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">amount(raw)</div>
+            <div class="info-value mono">${amount}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">signature</div>
+            <div class="info-value mono" title="${signature}">${short(signature)}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">from</div>
+            <div class="info-value mono" title="${source}">${short(source)}</div>
+          </div>
+          <div class="info-item">
+            <div class="info-label">to</div>
+            <div class="info-value mono" title="${destination}">${short(destination)}</div>
+          </div>
+        </div>
+      `;
+
+      transfersContainer.prepend(card);
+
+      setTimeout(() => {
+        const badge = card.querySelector('.block-badge');
+        if (badge) badge.remove();
+      }, 3000);
+
+      while (transfersContainer.children.length > 20) {
+        transfersContainer.removeChild(transfersContainer.lastChild);
       }
     });
   </script>
