@@ -6,6 +6,7 @@ import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import axios from "axios";
 
 dotenv.config();
 
@@ -19,10 +20,14 @@ const BLOCKS_STREAM_GROUP = process.env.BLOCKS_STREAM_GROUP || "socketio";
 const BLOCKS_STREAM_CONSUMER =
   process.env.BLOCKS_STREAM_CONSUMER ||
   `socketio-${process.pid}`;
+const SUI_GRAPHQL_URL = process.env.SUI_GRAPHQL_URL;
+const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL;
 const SOLANA_USDT_STREAM_KEY =
   process.env.SOLANA_USDT_STREAM_KEY || "solana:usdt:transfers";
 const SOLANA_USDC_STREAM_KEY =
   process.env.SOLANA_USDC_STREAM_KEY || "solana:usdc:transfers";
+const SUI_EVENTS_STREAM_KEY =
+  process.env.SUI_EVENTS_STREAM_KEY || "sui:events";
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -30,6 +35,324 @@ const io = new Server(httpServer, { cors: { origin: "*" } });
 
 // public 폴더의 정적 파일 서빙
 app.use(express.static(path.join(__dirname, '../public')));
+
+async function suiGraphql(query, variables) {
+  if (!SUI_GRAPHQL_URL) throw new Error("SUI_GRAPHQL_URL is not set");
+  const res = await axios.post(
+    SUI_GRAPHQL_URL,
+    { query, variables },
+    { headers: { "Content-Type": "application/json" } }
+  );
+  if (res?.data?.errors?.length) {
+    const msg = res.data.errors?.[0]?.message || JSON.stringify(res.data.errors);
+    throw new Error(msg);
+  }
+  return res?.data?.data;
+}
+
+async function solanaRpc(method, params = []) {
+  if (!SOLANA_RPC_URL) throw new Error("SOLANA_RPC_URL is not set");
+  const timeoutMs = Number(process.env.RPC_HTTP_TIMEOUT_MS || 15000);
+  const payload = { jsonrpc: "2.0", id: 1, method, params };
+
+  const res = await axios.post(
+    SOLANA_RPC_URL,
+    payload,
+    {
+      timeout: Number.isFinite(timeoutMs) ? timeoutMs : 15000,
+      validateStatus: () => true,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+  
+
+  if (res.status < 200 || res.status >= 300) {
+    const bodyPreview =
+      typeof res.data === "string"
+        ? res.data.slice(0, 300)
+        : JSON.stringify(res.data)?.slice(0, 300);
+    throw new Error(`HTTP ${res.status} from Solana RPC method=${method} (body: ${bodyPreview})`);
+  }
+  const data = res?.data;
+  if (!data || typeof data !== "object") {
+    throw new Error(`Invalid Solana RPC response type for method=${method}: ${typeof data}`);
+  }
+  if (data?.error) {
+    const msg = data.error?.message || JSON.stringify(data.error);
+    throw new Error(`Solana RPC error method=${method}: ${msg}`);
+  }
+
+  try {
+    const s = JSON.stringify(data?.result);
+    console.log(
+      `🛰️  [Solana][rpc:res:${method}]`,
+      s.length > 2000 ? s.slice(0, 2000) + "...(truncated)" : s
+    );
+  } catch {
+    console.log(`🛰️  [Solana][rpc:res:${method}]`, data?.result);
+  }
+  return data?.result;
+}
+
+// Solana slot -> transaction signatures (block explorer style UI)
+app.get("/api/solana/slot/:slot", async (req, res) => {
+  try {
+    const slotStr = String(req.params.slot || "").trim();
+    const slot = Number(slotStr);
+    if (!Number.isFinite(slot) || slot < 0) {
+      return res.status(400).json({ ok: false, error: "invalid slot" });
+    }
+    const limit = Math.min(Number(req.query.limit || 30) || 30, 200);
+
+    let block;
+    try {
+      block = await solanaRpc("getBlock", [
+        slot,
+        {
+          encoding: "jsonParsed",
+          transactionDetails: "signatures",
+          rewards: false,
+          maxSupportedTransactionVersion: 0,
+        },
+      ]);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      // Solana에는 skipped slot이 존재하고, RPC 노드가 해당 블록을 보관하지 않는 경우도 있어
+      // getBlock이 "Block not available for slot"로 실패할 수 있음. UI에서는 에러 대신 상태로 반환.
+      if (msg.includes("Block not available for slot")) {
+        // 근처에 실제 블록이 있는 슬롯을 같이 추천(작은 범위만 스캔)
+        let nearest = [];
+        try {
+          const from = Math.max(0, slot - 50);
+          const to = slot;
+          const blocks = await solanaRpc("getBlocks", [from, to]);
+          if (Array.isArray(blocks)) nearest = blocks.slice(-10);
+        } catch {}
+
+        return res.json({
+          ok: true,
+          slot,
+          skippedOrUnavailable: true,
+          message: msg,
+          signatures: [],
+          nearestAvailableSlots: nearest,
+        });
+      }
+      throw e;
+    }
+
+    const signatures = Array.isArray(block?.signatures) ? block.signatures.slice(0, limit) : [];
+    return res.json({
+      ok: true,
+      slot,
+      blockTime: block?.blockTime,
+      blockHeight: block?.blockHeight,
+      parentSlot: block?.parentSlot,
+      signatures,
+      truncated: Array.isArray(block?.signatures) ? block.signatures.length > limit : false,
+    });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Solana tx signature -> transaction detail (logs/instructions/token balances)
+app.get("/api/solana/tx/:sig", async (req, res) => {
+  try {
+    const sig = String(req.params.sig || "").trim();
+    if (!sig) return res.status(400).json({ ok: false, error: "missing signature" });
+
+    const tx = await solanaRpc("getTransaction", [
+      sig,
+      {
+        encoding: "jsonParsed",
+        maxSupportedTransactionVersion: 0,
+      },
+    ]);
+
+    return res.json({ ok: true, signature: sig, data: tx });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+function parseTxDigestsFromNodes(nodes) {
+  const out = [];
+  for (const n of nodes || []) {
+    const d = n?.digest || n?.transactionDigest || n?.txDigest;
+    if (typeof d === "string" && d.length) out.push(d);
+  }
+  return out;
+}
+
+// Sui checkpoint -> transaction digests (for block explorer style UI)
+app.get("/api/sui/checkpoint/:seq", async (req, res) => {
+  try {
+    const seqStr = String(req.params.seq || "").trim();
+    const seq = Number(seqStr);
+    if (!Number.isFinite(seq) || seq < 0) {
+      return res.status(400).json({ ok: false, error: "invalid sequenceNumber" });
+    }
+
+    const first = Math.min(Number(req.query.first || 30) || 30, 100);
+    const after = typeof req.query.after === "string" ? req.query.after : null;
+
+    // 스키마 버전에 따라 checkpoint 아래 트랜잭션 연결 필드가 다를 수 있어 fallback 시도
+    const variants = [
+      {
+        name: "checkpoint.transactions",
+        q: `
+          query ($seq: UInt53!, $first: Int!, $after: String) {
+            checkpoint(sequenceNumber: $seq) {
+              sequenceNumber
+              transactions(first: $first, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes { digest }
+              }
+            }
+          }
+        `,
+        pick: (data) => data?.checkpoint?.transactions,
+      },
+      {
+        name: "checkpoint.transactionBlocks",
+        q: `
+          query ($seq: UInt53!, $first: Int!, $after: String) {
+            checkpoint(sequenceNumber: $seq) {
+              sequenceNumber
+              transactionBlocks(first: $first, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes { digest }
+              }
+            }
+          }
+        `,
+        pick: (data) => data?.checkpoint?.transactionBlocks,
+      },
+      {
+        name: "checkpoint.query.transactions",
+        q: `
+          query ($seq: UInt53!, $first: Int!, $after: String) {
+            checkpoint(sequenceNumber: $seq) {
+              sequenceNumber
+              query {
+                transactions(first: $first, after: $after) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes { digest }
+                }
+              }
+            }
+          }
+        `,
+        pick: (data) => data?.checkpoint?.query?.transactions,
+      },
+    ];
+
+    let lastErr = null;
+    for (const v of variants) {
+      try {
+        const data = await suiGraphql(v.q, { seq, first, after });
+        const conn = v.pick(data);
+        const digests = parseTxDigestsFromNodes(conn?.nodes);
+        const pageInfo = conn?.pageInfo || {};
+        return res.json({
+          ok: true,
+          via: v.name,
+          sequenceNumber: seq,
+          digests,
+          pageInfo: {
+            hasNextPage: Boolean(pageInfo?.hasNextPage),
+            endCursor: pageInfo?.endCursor || null,
+          },
+        });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    return res.status(502).json({ ok: false, error: lastErr?.message || String(lastErr) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Sui txDigest -> transaction detail (effects/objectChanges/events)
+app.get("/api/sui/tx/:digest", async (req, res) => {
+  try {
+    const digest = String(req.params.digest || "").trim();
+    if (!digest) return res.status(400).json({ ok: false, error: "missing digest" });
+
+    // 여러 스키마 버전에 대응: transaction(...) 우선, 실패 시 transactions(...) 연결 조회 fallback
+    const queries = [
+      {
+        name: "transaction",
+        q: `
+          query ($digest: String!) {
+            transaction(digest: $digest) {
+              digest
+              sender { address }
+              # NOTE: 일부 Sui GraphQL 스키마에는 Transaction.timestamp / Transaction.checkpoint 가 없습니다.
+              # timestamp/체크포인트 정보는 effects에서 가져오는 쪽이 더 호환됩니다.
+
+              effects {
+                status
+                timestamp
+                checkpoint { sequenceNumber }
+                gasEffects {
+                  gasUsed
+                }
+                events {
+                  nodes {
+                    # 스키마에 따라 Event.type/parsedJson이 없을 수 있어, 일단 가장 흔한 필드 조합으로 요청
+                    type
+                    timestamp
+                    sender { address }
+                    parsedJson
+                    contents { type { repr } json }
+                  }
+                }
+                objectChanges {
+                  nodes {
+                    address
+                    type
+                    owner { __typename }
+                  }
+                }
+                balanceChanges {
+                  nodes {
+                    amount
+                    owner { address }
+                    coinType { repr }
+                  }
+                }
+              }
+            }
+          }
+        `,
+        pick: (data) => data?.transaction,
+      },
+    ];
+
+    let lastErr = null;
+    for (const item of queries) {
+      try {
+        const data = await suiGraphql(item.q, { digest });
+        const out = item.pick(data);
+        if (!out) {
+          lastErr = new Error(`No data for digest via ${item.name}`);
+          continue;
+        }
+        return res.json({ ok: true, via: item.name, data: out });
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    return res.status(502).json({ ok: false, error: lastErr?.message || String(lastErr) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
 
 // Redis 클라이언트 연결
 const pubClient = createClient({ url: REDIS_URL });
@@ -55,7 +378,12 @@ function fieldsArrayToObject(fields) {
 }
 
 async function ensureConsumerGroup() {
-  const keys = [BLOCKS_STREAM_KEY, SOLANA_USDT_STREAM_KEY, SOLANA_USDC_STREAM_KEY];
+  const keys = [
+    BLOCKS_STREAM_KEY,
+    SOLANA_USDT_STREAM_KEY,
+    SOLANA_USDC_STREAM_KEY,
+    SUI_EVENTS_STREAM_KEY,
+  ];
   for (const key of keys) {
     try {
       // XGROUP CREATE <stream> <group> $ MKSTREAM
@@ -109,6 +437,8 @@ async function consumeStreamForever() {
         BLOCKS_STREAM_KEY,
         SOLANA_USDT_STREAM_KEY,
         SOLANA_USDC_STREAM_KEY,
+        SUI_EVENTS_STREAM_KEY,
+        ">",
         ">",
         ">",
         ">",
@@ -133,6 +463,21 @@ async function consumeStreamForever() {
             };
             console.log(`📡 [Server] ${event.network} - Block/Slot: ${event.blockNumber}`);
             io.emit("newBlock", event);
+          } else if (streamKey === SUI_EVENTS_STREAM_KEY) {
+            const event = {
+              checkpoint: Number(data.checkpoint),
+              txDigest: data.txDigest,
+              eventSeq: Number(data.eventSeq),
+              type: data.type,
+              packageId: data.packageId,
+              module: data.module,
+              sender: data.sender,
+              json: data.json,
+              timestamp: Number(data.timestamp) || Date.now(),
+              uid: data.uid,
+              eventId: id,
+            };
+            io.emit("newSuiEvent", event);
           } else {
             const token = String(data.network || "")
               .toUpperCase()

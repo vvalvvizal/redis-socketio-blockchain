@@ -91,6 +91,70 @@
       margin-top: 12px;
     }
 
+    .clickable {
+      cursor: pointer;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 2px;
+    }
+
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 9999;
+      padding: 24px;
+    }
+
+    .modal {
+      max-width: 980px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+      overflow: hidden;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 16px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .modal-title {
+      font-weight: 600;
+      color: #111;
+    }
+
+    .modal-close {
+      border: 1px solid #ddd;
+      background: #fff;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    .modal-body {
+      padding: 14px 16px;
+      max-height: 70vh;
+      overflow: auto;
+    }
+
+    .modal-pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.85rem;
+      line-height: 1.35;
+      background: #fafafa;
+      border: 1px solid #eee;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
     .transfer-card {
       border: 2px solid #e5e5e5;
       border-radius: 6px;
@@ -138,6 +202,94 @@
     .block-card.sui {
       border-left: 4px solid #4da2ff;
       background: linear-gradient(to right, rgba(77, 162, 255, 0.08), transparent);
+    }
+
+    .details {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #f0f0f0;
+    }
+
+    .details-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .btn {
+      border: 1px solid #ddd;
+      background: #fff;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .tx-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .tx-item {
+      border: 1px solid #eee;
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #fff;
+    }
+
+    .tx-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .tx-digest {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.9rem;
+      color: #111;
+      cursor: pointer;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 2px;
+    }
+
+    .tx-meta {
+      font-size: 0.8rem;
+      color: #777;
+      white-space: nowrap;
+    }
+
+    .event-list {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #f3f3f3;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .event-item {
+      border-left: 3px solid #4da2ff;
+      padding-left: 10px;
+    }
+
+    .event-type {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.85rem;
+      color: #111;
+    }
+
+    .event-json {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.8rem;
+      color: #555;
+      margin-top: 4px;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     @keyframes slideIn {
@@ -262,6 +414,19 @@
     <div class="transfers-container" id="transfers">
       <div class="no-blocks">전송 이벤트를 기다리는 중...</div>
     </div>
+
+  </div>
+
+  <div class="modal-overlay" id="tx-modal-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="tx-modal-title">
+      <div class="modal-header">
+        <div class="modal-title" id="tx-modal-title">Sui Transaction</div>
+        <button class="modal-close" id="tx-modal-close">닫기</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-pre" id="tx-modal-content">loading...</div>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
@@ -321,7 +486,253 @@
             <div class="info-value">${secondsAgo === 0 ? '방금 전' : secondsAgo + '초 전'}</div>
           </div>
         </div>
+        ${
+          isSui
+            ? `
+        <div class="details">
+          <div class="details-header">
+            <div class="info-label">TRANSACTIONS</div>
+            <button class="btn" data-load-txs="1">Tx 보기</button>
+          </div>
+          <div class="tx-list" data-tx-list="1">
+            <div class="info-value" style="color:#777;">버튼을 눌러 트랜잭션을 불러오세요.</div>
+          </div>
+        </div>`
+            : isSolana
+            ? `
+        <div class="details">
+          <div class="details-header">
+            <div class="info-label">TRANSACTIONS</div>
+            <button class="btn" data-load-sol-txs="1">Tx 보기</button>
+          </div>
+          <div class="tx-list" data-sol-tx-list="1">
+            <div class="info-value" style="color:#777;">버튼을 눌러 트랜잭션을 불러오세요.</div>
+          </div>
+        </div>`
+            : ""
+        }
       `;
+
+      if (isSui) {
+        const btn = blockCard.querySelector("[data-load-txs]");
+        const listEl = blockCard.querySelector("[data-tx-list]");
+        let loading = false;
+        let endCursor = null;
+        let loadedOnce = false;
+
+        const renderTxs = async () => {
+          if (loading) return;
+          loading = true;
+          try {
+            if (!loadedOnce) {
+              listEl.innerHTML = `<div class="info-value" style="color:#777;">loading...</div>`;
+            }
+
+            const resp = await fetchCheckpointTxs(data.blockNumber, endCursor);
+            const digests = Array.isArray(resp.digests) ? resp.digests : [];
+            const hasNext = Boolean(resp.pageInfo?.hasNextPage);
+            endCursor = resp.pageInfo?.endCursor || null;
+            loadedOnce = true;
+
+            if (!digests.length && listEl.querySelector(".tx-item") == null) {
+              listEl.innerHTML = `<div class="info-value" style="color:#777;">트랜잭션 없음/조회 불가(인덱서 제한 가능)</div>`;
+              return;
+            }
+
+            if (listEl.querySelector(".tx-item") == null) {
+              listEl.innerHTML = "";
+            }
+
+            for (const d of digests) {
+              const item = document.createElement("div");
+              item.className = "tx-item";
+              item.innerHTML = `
+                <div class="tx-row">
+                  <div class="tx-digest" title="${d}">${short(d)}</div>
+                  <div class="tx-meta">click to expand</div>
+                </div>
+                <div class="event-list" style="display:none;"></div>
+              `;
+
+              const digestEl = item.querySelector(".tx-digest");
+              const evList = item.querySelector(".event-list");
+              let expanded = false;
+              let evLoaded = false;
+
+              digestEl.addEventListener("click", async () => {
+                expanded = !expanded;
+                evList.style.display = expanded ? "flex" : "none";
+                if (!expanded) return;
+                if (evLoaded) return;
+
+                evList.innerHTML = `<div class="info-value" style="color:#777;">loading tx detail...</div>`;
+                try {
+                  const detail = await fetchTxDetail(d);
+                  const tx = detail.data || {};
+                  const effects = tx.effects || {};
+                  const events = effects?.events?.nodes || [];
+                  const objectChanges = effects?.objectChanges?.nodes || [];
+
+                  evList.innerHTML = "";
+                  const header = document.createElement("div");
+                  header.className = "info-value";
+                  header.style.color = "#777";
+                  header.textContent = `events=${events.length} objectChanges=${objectChanges.length} status=${effects.status || ""}`;
+                  evList.appendChild(header);
+
+                  if (!events.length) {
+                    const none = document.createElement("div");
+                    none.className = "info-value";
+                    none.style.color = "#777";
+                    none.textContent = "이 트랜잭션에 이벤트가 없습니다(또는 스키마/인덱서 제한).";
+                    evList.appendChild(none);
+                  } else {
+                    for (const e of events) {
+                      const type = e?.type || "";
+                      const json = e?.parsedJson != null ? JSON.stringify(e.parsedJson) : "";
+                      const ev = document.createElement("div");
+                      ev.className = "event-item";
+                      ev.innerHTML = `
+                        <div class="event-type" title="${type}">${short(type) || "(type)"}</div>
+                        <div class="event-json">${short(json) || ""}</div>
+                      `;
+                      evList.appendChild(ev);
+                    }
+                  }
+                  evLoaded = true;
+                } catch (e) {
+                  evList.innerHTML = `<div class="info-value" style="color:#c00;">error: ${e?.message || e}</div>`;
+                }
+              });
+
+              listEl.appendChild(item);
+            }
+
+            if (hasNext) {
+              const more = document.createElement("button");
+              more.className = "btn";
+              more.textContent = "더 보기";
+              more.addEventListener("click", async () => {
+                more.disabled = true;
+                await renderTxs();
+                more.remove();
+              });
+              listEl.appendChild(more);
+            }
+          } catch (e) {
+            listEl.innerHTML = `<div class="info-value" style="color:#c00;">error: ${e?.message || e}</div>`;
+          } finally {
+            loading = false;
+          }
+        };
+
+        if (btn) btn.addEventListener("click", renderTxs);
+      }
+
+      if (isSolana) {
+        const btn = blockCard.querySelector("[data-load-sol-txs]");
+        const listEl = blockCard.querySelector("[data-sol-tx-list]");
+        let loading = false;
+        let loadedOnce = false;
+
+        const renderSolTxs = async () => {
+          if (loading) return;
+          loading = true;
+          try {
+            if (!loadedOnce) {
+              listEl.innerHTML = `<div class="info-value" style="color:#777;">loading...</div>`;
+            }
+
+            const resp = await fetchSolanaSlotTxs(data.blockNumber);
+            const sigs = Array.isArray(resp.signatures) ? resp.signatures : [];
+            loadedOnce = true;
+
+            if (!sigs.length) {
+              listEl.innerHTML = `<div class="info-value" style="color:#777;">트랜잭션 없음/조회 불가</div>`;
+              return;
+            }
+
+            listEl.innerHTML = "";
+
+            for (const sig of sigs) {
+              const item = document.createElement("div");
+              item.className = "tx-item";
+              item.innerHTML = `
+                <div class="tx-row">
+                  <div class="tx-digest" title="${sig}">${short(sig)}</div>
+                  <div class="tx-meta">click to expand</div>
+                </div>
+                <div class="event-list" style="display:none;"></div>
+              `;
+
+              const sigEl = item.querySelector(".tx-digest");
+              const evList = item.querySelector(".event-list");
+              let expanded = false;
+              let evLoaded = false;
+
+              sigEl.addEventListener("click", async () => {
+                expanded = !expanded;
+                evList.style.display = expanded ? "flex" : "none";
+                if (!expanded) return;
+                if (evLoaded) return;
+
+                evList.innerHTML = `<div class="info-value" style="color:#777;">loading tx detail...</div>`;
+                try {
+                  const detail = await fetchSolanaTx(sig);
+                  const tx = detail.data || {};
+                  const meta = tx.meta || {};
+                  const msg = tx.transaction?.message || {};
+                  const instructions = Array.isArray(msg.instructions) ? msg.instructions : [];
+                  const logs = Array.isArray(meta.logMessages) ? meta.logMessages : [];
+                  const err = meta.err;
+                  const tokenPre = Array.isArray(meta.preTokenBalances) ? meta.preTokenBalances : [];
+                  const tokenPost = Array.isArray(meta.postTokenBalances) ? meta.postTokenBalances : [];
+
+                  evList.innerHTML = "";
+                  const header = document.createElement("div");
+                  header.className = "info-value";
+                  header.style.color = "#777";
+                  header.textContent =
+                    `status=${err ? "ERR" : "OK"} ` +
+                    `instructions=${instructions.length} logs=${logs.length} ` +
+                    `tokenBalances(pre/post)=${tokenPre.length}/${tokenPost.length}`;
+                  evList.appendChild(header);
+
+                  const maxLogs = 12;
+                  for (const l of logs.slice(0, maxLogs)) {
+                    const ev = document.createElement("div");
+                    ev.className = "event-item";
+                    ev.innerHTML = `
+                      <div class="event-type">log</div>
+                      <div class="event-json">${String(l)}</div>
+                    `;
+                    evList.appendChild(ev);
+                  }
+                  if (logs.length > maxLogs) {
+                    const more = document.createElement("div");
+                    more.className = "info-value";
+                    more.style.color = "#777";
+                    more.textContent = `... logs truncated (${maxLogs}/${logs.length})`;
+                    evList.appendChild(more);
+                  }
+
+                  evLoaded = true;
+                } catch (e) {
+                  evList.innerHTML = `<div class="info-value" style="color:#c00;">error: ${e?.message || e}</div>`;
+                }
+              });
+
+              listEl.appendChild(item);
+            }
+          } catch (e) {
+            listEl.innerHTML = `<div class="info-value" style="color:#c00;">error: ${e?.message || e}</div>`;
+          } finally {
+            loading = false;
+          }
+        };
+
+        if (btn) btn.addEventListener("click", renderSolTxs);
+      }
 
       blocksContainer.prepend(blockCard);
 
@@ -341,6 +752,62 @@
       if (!s || typeof s !== "string") return "";
       if (s.length <= 12) return s;
       return `${s.slice(0, 6)}...${s.slice(-4)}`;
+    }
+
+    function showTxModal(title, content) {
+      const overlay = document.getElementById("tx-modal-overlay");
+      const titleEl = document.getElementById("tx-modal-title");
+      const contentEl = document.getElementById("tx-modal-content");
+      titleEl.textContent = title || "Sui Transaction";
+      contentEl.textContent = content || "";
+      overlay.style.display = "block";
+    }
+
+    function hideTxModal() {
+      const overlay = document.getElementById("tx-modal-overlay");
+      overlay.style.display = "none";
+    }
+
+    document.getElementById("tx-modal-close").addEventListener("click", hideTxModal);
+    document.getElementById("tx-modal-overlay").addEventListener("click", (e) => {
+      if (e.target && e.target.id === "tx-modal-overlay") hideTxModal();
+    });
+
+    async function fetchTxDetail(txDigest) {
+      const url = `/api/sui/tx/${encodeURIComponent(txDigest)}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+      return json;
+    }
+
+    async function fetchCheckpointTxs(seq, afterCursor) {
+      const params = new URLSearchParams();
+      params.set("first", "30");
+      if (afterCursor) params.set("after", afterCursor);
+      const url = `/api/sui/checkpoint/${encodeURIComponent(String(seq))}?${params.toString()}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+      return json;
+    }
+
+    async function fetchSolanaSlotTxs(slot) {
+      const params = new URLSearchParams();
+      params.set("limit", "30");
+      const url = `/api/solana/slot/${encodeURIComponent(String(slot))}?${params.toString()}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+      return json;
+    }
+
+    async function fetchSolanaTx(signature) {
+      const url = `/api/solana/tx/${encodeURIComponent(signature)}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (!json?.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+      return json;
     }
 
     socket.on("newTransfer", (data) => {
@@ -401,6 +868,8 @@
         transfersContainer.removeChild(transfersContainer.lastChild);
       }
     });
+
+    // NOTE: Sui 이벤트는 "Checkpoint(블록) → Tx → Events" 중첩 UI에서 보여줍니다.
   </script>
 </body>
 </html>

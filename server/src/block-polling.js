@@ -23,10 +23,16 @@ const SOLANA_RECONCILE_INTERVAL = Number(
   process.env.SOLANA_RECONCILE_INTERVAL || 5000
 );
 const SOLANA_ENABLE_TOKEN_BLOCKSUB = String(process.env.SOLANA_ENABLE_TOKEN_BLOCKSUB || "false").toLowerCase() === "true";
-const SOLANA_USDT_MINT = process.env.SOLANA_USDT_MINT; // base58 mint address
-const SOLANA_USDT_STREAM_KEY = process.env.SOLANA_USDT_STREAM_KEY || "solana:usdt:transfers";
-const SOLANA_USDC_MINT = process.env.SOLANA_USDC_MINT; // base58 mint address
-const SOLANA_USDC_STREAM_KEY = process.env.SOLANA_USDC_STREAM_KEY || "solana:usdc:transfers";
+//const SOLANA_USDT_MINT = process.env.SOLANA_USDT_MINT; // base58 mint address
+//const SOLANA_USDT_STREAM_KEY = process.env.SOLANA_USDT_STREAM_KEY || "solana:usdt:transfers";
+//const SOLANA_USDC_MINT = process.env.SOLANA_USDC_MINT; // base58 mint address
+//const SOLANA_USDC_STREAM_KEY = process.env.SOLANA_USDC_STREAM_KEY || "solana:usdc:transfers";
+const SUI_EVENTS_STREAM_KEY = process.env.SUI_EVENTS_STREAM_KEY || "sui:events";
+const SUI_EVENTS_PAGE_SIZE = Number(process.env.SUI_EVENTS_PAGE_SIZE || 50);
+const SUI_EVENTS_MAX_PAGES_PER_TICK = Number(process.env.SUI_EVENTS_MAX_PAGES_PER_TICK || 5);
+const SUI_EVENTS_START_FROM_LATEST =
+  String(process.env.SUI_EVENTS_START_FROM_LATEST || "true").toLowerCase() === "true";
+const SUI_EVENT_JSON_MAXLEN = Number(process.env.SUI_EVENT_JSON_MAXLEN || 2000);
 const SOLANA_TOKEN_PROGRAM_ID =
   process.env.SOLANA_TOKEN_PROGRAM_ID || "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SOLANA_BLOCKSUB_MENTIONS =
@@ -209,6 +215,67 @@ async function xaddBlockEvent(event) {
   ]);
 }
 
+async function xaddSuiEvent(event) {
+  // Store Sui Move events in a dedicated stream
+  await redis.sendCommand([
+    "XADD",
+    SUI_EVENTS_STREAM_KEY,
+    "MAXLEN",
+    "~",
+    String(STREAM_MAXLEN),
+    "*",
+    "network",
+    "Sui Testnet",
+    "checkpoint",
+    String(event.checkpoint ?? ""),
+    "txDigest",
+    String(event.txDigest ?? ""),
+    "eventSeq",
+    String(event.eventSeq ?? ""),
+    "type",
+    String(event.type ?? ""),
+    "packageId",
+    String(event.packageId ?? ""),
+    "module",
+    String(event.module ?? ""),
+    "sender",
+    String(event.sender ?? ""),
+    "json",
+    String(event.json ?? ""),
+    "timestamp",
+    String(event.timestamp ?? Date.now()),
+    "uid",
+    String(event.uid ?? ""),
+  ]);
+}
+
+async function suiGraphql(query, variables) {
+  if (!SUI_GRAPHQL_URL) throw new Error("SUI_GRAPHQL_URL is not set");
+  const res = await axios.post(
+    SUI_GRAPHQL_URL,
+    { query, variables },
+    { headers: { "Content-Type": "application/json" } }
+  );
+  if (res?.data?.errors?.length) {
+    const msg = res.data.errors?.[0]?.message || JSON.stringify(res.data.errors);
+    throw new Error(`Sui GraphQL error: ${msg}`);
+  }
+  return res?.data?.data;
+}
+
+function safeJsonStringify(v, maxLen) {
+  try {
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    if (!s) return "";
+    if (typeof maxLen === "number" && Number.isFinite(maxLen) && s.length > maxLen) {
+      return s.slice(0, Math.max(0, maxLen)) + "...(truncated)";
+    }
+    return s;
+  } catch {
+    return "";
+  }
+}
+
 // 네트워크별 폴링 간격 (밀리초)
 const POLYGON_POLL_INTERVAL = Number(process.env.POLYGON_POLL_INTERVAL);
 const SUI_POLL_INTERVAL = Number(process.env.SUI_POLL_INTERVAL); 
@@ -277,6 +344,106 @@ async function pollSuiCheckpoint() {
     });
   } catch (error) {
     console.error("❌ [Sui] Error:", error?.message || error);
+  }
+}
+
+// Sui (GraphQL RPC) 이벤트 폴링 (cursor 기반)
+async function pollSuiEvents() {
+  try {
+    const cursorKey = "sui:lastEventCursor";
+    let cursor = await redis.get(cursorKey);
+
+    // 최초 실행 시, 과거 전체 이벤트를 쓸어오지 않도록 "최신부터" 시작하게 할 수 있음
+    if (!cursor && SUI_EVENTS_START_FROM_LATEST) {
+      try {
+        const data = await suiGraphql(
+          "query { events(last: 1) { pageInfo { endCursor } } }",
+          {}
+        );
+        const endCursor = data?.events?.pageInfo?.endCursor;
+        if (typeof endCursor === "string" && endCursor.length > 0) {
+          await redis.set(cursorKey, endCursor);
+          return;
+        }
+      } catch (e) {
+        // 스키마가 last를 지원하지 않으면, 그냥 처음부터(또는 after=null) 소량만 가져오도록 진행
+        console.error("❌ [Sui][events] init-from-latest failed:", e?.message || e);
+      }
+    }
+
+    const query = `
+      query ($first: Int!, $after: String) {
+        events(first: $first, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            sequenceNumber
+            timestamp
+            sender { address }
+            transaction { digest }
+            transactionModule { name package { digest } }
+            contents { type { repr } json }
+          }
+        }
+      }
+    `;
+
+    const first = Number.isFinite(SUI_EVENTS_PAGE_SIZE) ? SUI_EVENTS_PAGE_SIZE : 50;
+    const maxPages =
+      Number.isFinite(SUI_EVENTS_MAX_PAGES_PER_TICK) ? SUI_EVENTS_MAX_PAGES_PER_TICK : 5;
+
+    let pages = 0;
+    while (pages < maxPages) {
+      pages += 1;
+      const data = await suiGraphql(query, {
+        first,
+        after: cursor || null,
+      });
+
+      const nodes = data?.events?.nodes || [];
+      const pageInfo = data?.events?.pageInfo;
+      const endCursor = pageInfo?.endCursor;
+      const hasNextPage = Boolean(pageInfo?.hasNextPage);
+
+      for (const n of nodes) {
+        const txDigest = n?.transaction?.digest;
+        const eventSeq = n?.sequenceNumber;
+        const uid = txDigest && eventSeq != null ? `${txDigest}:${eventSeq}` : "";
+
+        const checkpoint = undefined;
+        const sender = n?.sender?.address;
+        const moduleName = n?.transactionModule?.name;
+        const packageId = n?.transactionModule?.package?.digest;
+
+        const type = n?.contents?.type?.repr;
+        const json = safeJsonStringify(n?.contents?.json, SUI_EVENT_JSON_MAXLEN);
+
+        const tsNum = Number(n?.timestamp);
+        const ts = Number.isFinite(tsNum) ? tsNum : Date.now();
+
+        await xaddSuiEvent({
+          checkpoint,
+          txDigest,
+          eventSeq,
+          type,
+          packageId,
+          module: moduleName,
+          sender,
+          json,
+          timestamp: ts,
+          uid,
+        });
+      }
+
+      if (typeof endCursor === "string" && endCursor.length > 0) {
+        cursor = endCursor;
+        await redis.set(cursorKey, cursor);
+      }
+
+      if (!hasNextPage) break;
+      if (!nodes.length) break;
+    }
+  } catch (error) {
+    console.error("❌ [Sui][events] Error:", error?.message || error);
   }
 }
 
@@ -409,9 +576,11 @@ function startSolanaSlotSubscription() {
 // 즉시 한 번 실행
 pollPolygonBlock();
 pollSuiCheckpoint();
+pollSuiEvents();
 startSolanaSlotSubscription();
 //startSolanaUsdtBlockSubscription();
  
 setInterval(pollPolygonBlock, POLYGON_POLL_INTERVAL);
 
 setInterval(pollSuiCheckpoint, SUI_POLL_INTERVAL);
+setInterval(pollSuiEvents, SUI_POLL_INTERVAL);

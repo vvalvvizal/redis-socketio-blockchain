@@ -158,6 +158,10 @@ export default class SolanaSlotSubscriber {
     });
 
     this.ws.on("message", async (raw) => {
+      const s = raw?.toString?.() || "";
+      const preview = s.length > 2000 ? s.slice(0, 2000) + "...(truncated)" : s;
+      console.log("🛰️  [Solana][ws:raw]", preview);
+
       let msg;
       try {
         msg = JSON.parse(raw.toString());
