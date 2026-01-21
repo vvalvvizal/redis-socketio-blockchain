@@ -65,6 +65,36 @@ npm run polling
 
 브라우저: `http://localhost:4000`
 
+## 아키텍처
+
+```
+┌──────────────────────────┐
+│ block-polling.js          │
+│ - Polygon: HTTP polling   │
+│ - Solana: WS subscribe    │
+│   + HTTP reconcile/catchup│
+│ - Sui: GraphQL polling    │
+└─────────────┬────────────┘
+              │ XADD
+              ▼
+        ┌───────────┐
+        │ Redis      │
+        │ Streams    │  blocks:stream, sui:events ...
+        └─────┬─────┘
+              │ XREADGROUP / XACK
+              ▼
+┌──────────────────────────┐
+│ index.js                  │
+│ - Socket.IO + HTTP API     │
+│ - stream consumer          │
+└─────────────┬────────────┘
+              │ WebSocket
+              ▼
+        ┌───────────┐
+        │ Browser UI │  server/public/index.html
+        └───────────┘
+```
+
 ## 데이터 흐름(핵심)
 
 - `server/src/block-polling.js`
