@@ -291,31 +291,20 @@ app.get("/api/sui/tx/:digest", async (req, res) => {
             transaction(digest: $digest) {
               digest
               sender { address }
-              # NOTE: 일부 Sui GraphQL 스키마에는 Transaction.timestamp / Transaction.checkpoint 가 없습니다.
-              # timestamp/체크포인트 정보는 effects에서 가져오는 쪽이 더 호환됩니다.
-
               effects {
                 status
                 timestamp
                 checkpoint { sequenceNumber }
-                gasEffects {
-                  gasUsed
-                }
                 events {
                   nodes {
-                    # 스키마에 따라 Event.type/parsedJson이 없을 수 있어, 일단 가장 흔한 필드 조합으로 요청
-                    type
                     timestamp
                     sender { address }
-                    parsedJson
                     contents { type { repr } json }
                   }
                 }
                 objectChanges {
                   nodes {
                     address
-                    type
-                    owner { __typename }
                   }
                 }
                 balanceChanges {
