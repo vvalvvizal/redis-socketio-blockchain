@@ -21,6 +21,7 @@ const BLOCKS_STREAM_CONSUMER =
   process.env.BLOCKS_STREAM_CONSUMER ||
   `socketio-${process.pid}`;
 const SUI_GRAPHQL_URL = process.env.SUI_GRAPHQL_URL;
+const POLYGON_RPC_URL = process.env.POLYGON_RPC_URL;
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL;
 const SOLANA_USDT_STREAM_KEY =
   process.env.SOLANA_USDT_STREAM_KEY || "solana:usdt:transfers";
@@ -93,6 +94,90 @@ async function solanaRpc(method, params = []) {
   }
   return data?.result;
 }
+
+async function evmRpc(rpcUrl, method, params = []) {
+  if (!rpcUrl) throw new Error(`${method}: RPC URL is not set`);
+  const timeoutMs = Number(process.env.RPC_HTTP_TIMEOUT_MS || 15000);
+  const payload = { jsonrpc: "2.0", id: 1, method, params };
+  const res = await axios.post(
+    rpcUrl,
+    payload,
+    {
+      timeout: Number.isFinite(timeoutMs) ? timeoutMs : 15000,
+      validateStatus: () => true,
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+  if (res.status < 200 || res.status >= 300) {
+    const bodyPreview =
+      typeof res.data === "string"
+        ? res.data.slice(0, 300)
+        : JSON.stringify(res.data)?.slice(0, 300);
+    throw new Error(`HTTP ${res.status} from EVM RPC method=${method} (body: ${bodyPreview})`);
+  }
+  const data = res?.data;
+  if (!data || typeof data !== "object") {
+    throw new Error(`Invalid EVM RPC response type for method=${method}: ${typeof data}`);
+  }
+  if (data?.error) {
+    const msg = data.error?.message || JSON.stringify(data.error);
+    throw new Error(`EVM RPC error method=${method}: ${msg}`);
+  }
+  return data?.result;
+}
+
+// Polygon block -> tx hashes (block explorer style)
+app.get("/api/polygon/block/:n", async (req, res) => {
+  try {
+    if (!POLYGON_RPC_URL) throw new Error("POLYGON_RPC_URL is not set");
+    const nStr = String(req.params.n || "").trim();
+    const n = Number(nStr);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({ ok: false, error: "invalid block number" });
+    }
+    const limit = Math.min(Number(req.query.limit || 200) || 200, 2000);
+
+    const block = await evmRpc(POLYGON_RPC_URL, "eth_getBlockByNumber", [
+      `0x${n.toString(16)}`,
+      false,
+    ]);
+    const txs = Array.isArray(block?.transactions) ? block.transactions : [];
+    const timestampMs =
+      typeof block?.timestamp === "string"
+        ? parseInt(block.timestamp, 16) * 1000
+        : null;
+
+    return res.json({
+      ok: true,
+      blockNumber: n,
+      timestamp: timestampMs,
+      transactions: txs.slice(0, limit),
+      truncated: txs.length > limit,
+    });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Polygon tx hash -> receipt (logs/events)
+app.get("/api/polygon/tx/:hash", async (req, res) => {
+  try {
+    if (!POLYGON_RPC_URL) throw new Error("POLYGON_RPC_URL is not set");
+    const hash = String(req.params.hash || "").trim();
+    if (!hash || !hash.startsWith("0x")) {
+      return res.status(400).json({ ok: false, error: "invalid tx hash" });
+    }
+
+    const [tx, receipt] = await Promise.all([
+      evmRpc(POLYGON_RPC_URL, "eth_getTransactionByHash", [hash]),
+      evmRpc(POLYGON_RPC_URL, "eth_getTransactionReceipt", [hash]),
+    ]);
+
+    return res.json({ ok: true, hash, tx, receipt });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: e?.message || String(e) });
+  }
+});
 
 // Solana slot -> transaction signatures (block explorer style UI)
 app.get("/api/solana/slot/:slot", async (req, res) => {
