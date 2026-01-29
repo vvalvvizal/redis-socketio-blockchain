@@ -29,6 +29,8 @@ const SOLANA_USDC_STREAM_KEY =
   process.env.SOLANA_USDC_STREAM_KEY || "solana:usdc:transfers";
 const SUI_EVENTS_STREAM_KEY =
   process.env.SUI_EVENTS_STREAM_KEY || "sui:events";
+const POLYGON_EVENTS_STREAM_KEY =
+  process.env.POLYGON_EVENTS_STREAM_KEY || "polygon:events";
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -452,12 +454,7 @@ function fieldsArrayToObject(fields) {
 }
 
 async function ensureConsumerGroup() {
-  const keys = [
-    BLOCKS_STREAM_KEY,
-    SOLANA_USDT_STREAM_KEY,
-    SOLANA_USDC_STREAM_KEY,
-    SUI_EVENTS_STREAM_KEY,
-  ];
+  const keys = [BLOCKS_STREAM_KEY, SUI_EVENTS_STREAM_KEY, POLYGON_EVENTS_STREAM_KEY];
   for (const key of keys) {
     try {
       // XGROUP CREATE <stream> <group> $ MKSTREAM
@@ -497,7 +494,7 @@ async function consumeStreamForever() {
   while (true) {
     try {
       // 새 메시지 블로킹 읽기 (3개 stream 동시 소비)
-      // XREADGROUP GROUP <group> <consumer> COUNT <n> BLOCK <ms> STREAMS <k1> <k2> <k3> > > >
+      // XREADGROUP GROUP <group> <consumer> COUNT <n> BLOCK <ms> STREAMS <key1> <key2> <key3> > > >
       const res = await streamClient.sendCommand([
         "XREADGROUP",
         "GROUP",
@@ -509,10 +506,8 @@ async function consumeStreamForever() {
         "5000",
         "STREAMS",
         BLOCKS_STREAM_KEY,
-        SOLANA_USDT_STREAM_KEY,
-        SOLANA_USDC_STREAM_KEY,
         SUI_EVENTS_STREAM_KEY,
-        ">",
+        POLYGON_EVENTS_STREAM_KEY,
         ">",
         ">",
         ">",
@@ -551,26 +546,43 @@ async function consumeStreamForever() {
               uid: data.uid,
               eventId: id,
             };
+            console.log(`📡 [Server] Sui event checkpoint=${event.checkpoint} txDigest=${(event.txDigest || "").slice(0, 16)}... type=${event.type || "?"}`);
             io.emit("newSuiEvent", event);
-          } else {
-            const token = String(data.network || "")
-              .toUpperCase()
-              .includes("USDC")
-              ? "USDC"
-              : "USDT";
+          } else if (streamKey === POLYGON_EVENTS_STREAM_KEY) {
             const event = {
-              token,
-              slot: Number(data.slot),
-              signature: data.signature,
-              source: data.source,
-              destination: data.destination,
-              authority: data.authority,
-              mint: data.mint,
-              amount: data.amount,
+              network: data.network,
+              blockNumber: Number(data.blockNumber),
+              txHash: data.txHash,
+              logIndex: Number(data.logIndex),
+              address: data.address,
+              topics: data.topics,
+              data: data.data,
+              removed: data.removed === "true",
               timestamp: Number(data.timestamp) || Date.now(),
+              uid: data.uid,
               eventId: id,
             };
-            io.emit("newTransfer", event);
+            console.log(`📡 [Server] Polygon event block=${event.blockNumber} txHash=${(event.txHash || "").slice(0, 18)}... address=${(event.address || "").slice(0, 14)}...`);
+            io.emit("newPolygonEvent", event);
+          } else {
+            // const token = String(data.network || "")
+            //   .toUpperCase()
+            //   .includes("USDC")
+            //   ? "USDC"
+            //   : "USDT";
+            // const event = {
+            //   token,
+            //   slot: Number(data.slot),
+            //   signature: data.signature,
+            //   source: data.source,
+            //   destination: data.destination,
+            //   authority: data.authority,
+            //   mint: data.mint,
+            //   amount: data.amount,
+            //   timestamp: Number(data.timestamp) || Date.now(),
+            //   eventId: id,
+            // };
+            // io.emit("newTransfer", event);
           }
 
           const arr = ackByStream.get(streamKey) || [];
